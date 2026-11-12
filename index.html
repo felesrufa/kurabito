@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'none'; manifest-src 'self'; worker-src 'self'; form-action 'none'; base-uri 'none'; object-src 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#b7282e">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="kurabito">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <title>kurabito</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="bar">
+    <h1 class="title">kurabito</h1>
+    <span class="today" id="today"></span>
+  </header>
+
+  <main>
+    <!-- 対応待ち -->
+    <section id="view-todo" class="view" aria-labelledby="tab-todo">
+      <h2 class="view-title">対応待ち</h2>
+      <p class="hint" id="todo-summary"></p>
+      <div id="todo-list" class="cards"></div>
+    </section>
+
+    <!-- 一覧 -->
+    <section id="view-list" class="view" hidden aria-labelledby="tab-list">
+      <h2 class="view-title">一覧</h2>
+      <div class="tools">
+        <input type="search" id="q" placeholder="品名・置き場所・メモで探す" autocomplete="off">
+        <div class="row">
+          <select id="f-genre" aria-label="ジャンル">
+            <option value="">すべてのジャンル</option>
+          </select>
+          <select id="f-sort" aria-label="並び順">
+            <option value="due">期限が近い順</option>
+            <option value="name">名前順</option>
+            <option value="location">置き場所順</option>
+            <option value="updated">更新が新しい順</option>
+          </select>
+        </div>
+      </div>
+      <p class="hint" id="list-summary"></p>
+      <ul id="item-list" class="items"></ul>
+    </section>
+
+    <!-- 設定 -->
+    <section id="view-settings" class="view" hidden aria-labelledby="tab-settings">
+      <h2 class="view-title">設定</h2>
+
+      <div class="panel">
+        <h3>知らせるタイミング</h3>
+        <label class="field">
+          <span>期限の何日前から「対応待ち」に出すか</span>
+          <input type="number" id="s-lead" min="0" max="365" inputmode="numeric">
+        </label>
+        <p class="hint">品目ごとに変えたいときは、その品の編集画面で指定できます。</p>
+      </div>
+
+      <div class="panel">
+        <h3>バックアップ</h3>
+        <p class="hint">データはこの端末の中にだけあります。機種変更・消去に備えて、ときどき書き出してください。書き出したファイルは、人に見られない場所に保管してください。</p>
+        <div class="btns">
+          <button type="button" id="b-export" class="btn primary">書き出す</button>
+          <label class="btn">
+            読み込む
+            <input type="file" id="b-import" accept="application/json,.json" hidden>
+          </label>
+        </div>
+        <p class="hint" id="last-export"></p>
+      </div>
+
+      <div class="panel">
+        <h3>保存の状態</h3>
+        <p class="hint" id="persist-state"></p>
+      </div>
+
+      <div class="panel danger">
+        <h3>すべて消す</h3>
+        <p class="hint">この端末のkurabitoのデータをすべて消します。元に戻せません。</p>
+        <button type="button" id="b-wipe" class="btn warn">すべて消す</button>
+      </div>
+
+      <p class="hint ver">kurabito v<span id="ver"></span> ・ データは外部に送信しません</p>
+    </section>
+  </main>
+
+  <button type="button" id="fab" class="fab" aria-label="品を追加">＋</button>
+
+  <nav class="tabs" role="tablist">
+    <button type="button" role="tab" id="tab-todo" data-view="todo" aria-selected="true">対応待ち<span class="badge" id="badge" hidden></span></button>
+    <button type="button" role="tab" id="tab-list" data-view="list" aria-selected="false">一覧</button>
+    <button type="button" role="tab" id="tab-settings" data-view="settings" aria-selected="false">設定</button>
+  </nav>
+
+  <!-- 品の登録・編集 -->
+  <dialog id="dlg" class="dlg">
+    <form id="item-form" method="dialog" novalidate>
+      <h2 id="dlg-title">品を追加</h2>
+
+      <label class="field"><span>品名 <em>必須</em></span>
+        <input name="name" required maxlength="80" autocomplete="off"></label>
+
+      <div class="grid2">
+        <label class="field"><span>ジャンル</span>
+          <select name="genre"></select></label>
+        <label class="field"><span>置き場所</span>
+          <input name="location" list="dl-location" maxlength="40" autocomplete="off"></label>
+      </div>
+
+      <div class="grid3">
+        <label class="field"><span>個数</span>
+          <input name="quantity" type="number" min="0" step="any" inputmode="decimal"></label>
+        <label class="field"><span>単位</span>
+          <input name="unit" list="dl-unit" maxlength="10" placeholder="個" autocomplete="off"></label>
+        <label class="field"><span>最低個数</span>
+          <input name="minQuantity" type="number" min="0" step="any" inputmode="decimal" placeholder="なし"></label>
+      </div>
+      <div class="qty-steps" aria-label="個数をすばやく変える">
+        <button type="button" data-step="-1" class="btn small">−1</button>
+        <button type="button" data-step="1" class="btn small">＋1</button>
+      </div>
+
+      <div class="grid2">
+        <label class="field"><span>賞味期限</span>
+          <input name="bestBefore" type="date"></label>
+        <label class="field"><span>使用期限</span>
+          <input name="useBy" type="date"></label>
+      </div>
+
+      <div class="grid2">
+        <label class="field"><span>見直し日 <small>(サイズ確認など)</small></span>
+          <input name="reviewAt" type="date"></label>
+        <label class="field"><span>何日前から知らせる</span>
+          <input name="leadDays" type="number" min="0" max="365" inputmode="numeric" placeholder="既定"></label>
+      </div>
+
+      <details class="more">
+        <summary>メーカー・型番・サイズ・メモ</summary>
+        <div class="grid2">
+          <label class="field"><span>メーカー</span>
+            <input name="maker" maxlength="40" autocomplete="off"></label>
+          <label class="field"><span>型番</span>
+            <input name="model" maxlength="40" autocomplete="off"></label>
+        </div>
+        <label class="field"><span>サイズ</span>
+          <input name="size" maxlength="20" autocomplete="off"></label>
+        <label class="field"><span>メモ</span>
+          <textarea name="memo" rows="3" maxlength="500"></textarea></label>
+      </details>
+
+      <p class="error" id="form-error" role="alert" hidden></p>
+
+      <div class="dlg-btns">
+        <button type="button" id="b-delete" class="btn warn" hidden>削除</button>
+        <span class="spacer"></span>
+        <button type="button" id="b-cancel" class="btn">やめる</button>
+        <button type="submit" class="btn primary">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <datalist id="dl-location"></datalist>
+  <datalist id="dl-unit">
+    <option value="個"><option value="本"><option value="L"><option value="枚">
+    <option value="回分"><option value="食"><option value="缶"><option value="袋">
+    <option value="箱"><option value="巻"><option value="ロール"><option value="セット">
+  </datalist>
+
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>

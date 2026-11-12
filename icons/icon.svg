@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#b7282e"/>
+  <!-- 蔵 -->
+  <path d="M96 236 256 120l160 116v20H96z" fill="#2a2622"/>
+  <rect x="128" y="256" width="256" height="150" fill="#faf7f2"/>
+  <rect x="128" y="356" width="256" height="50" fill="#2a2622"/>
+  <rect x="226" y="296" width="60" height="110" rx="4" fill="#2a2622"/>
+  <rect x="236" y="306" width="40" height="90" rx="2" fill="#b7282e"/>
+  <circle cx="256" cy="204" r="16" fill="#faf7f2"/>
+</svg>

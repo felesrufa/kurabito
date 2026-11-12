@@ -1,0 +1,7 @@
+# 書き出したバックアップ(持ち物の中身)は絶対にリポジトリに入れない
+kurabito-backup-*.json
+*.backup.json
+/private/
+.DS_Store
+Thumbs.db
+node_modules/
