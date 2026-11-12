@@ -33,6 +33,10 @@
     <!-- 一覧 -->
     <section id="view-list" class="view" hidden aria-labelledby="tab-list">
       <h2 class="view-title">一覧</h2>
+      <details id="totals" class="totals" open hidden>
+        <summary>まとめ名ごとの合計</summary>
+        <ul id="totals-list"></ul>
+      </details>
       <div class="tools">
         <input type="search" id="q" placeholder="品名・置き場所・メモで探す" autocomplete="off">
         <div class="row">
@@ -128,6 +132,16 @@
         <button type="button" data-step="1" class="btn small">＋1</button>
       </div>
 
+      <div class="grid3">
+        <label class="field"><span>まとめ名</span>
+          <input name="group" list="dl-group" maxlength="40" placeholder="品名と同じ" autocomplete="off"></label>
+        <label class="field"><span>1つあたりの量</span>
+          <input name="amountPer" type="number" min="0" step="any" inputmode="decimal" placeholder="なし"></label>
+        <label class="field"><span>量の単位</span>
+          <input name="amountUnit" list="dl-amount-unit" maxlength="10" placeholder="L など" autocomplete="off"></label>
+      </div>
+      <p class="hint">まとめ名と単位が同じ品だけを合計します(例:まとめ名「水」、1つあたり 0.5 L)。空欄でもかまいません。</p>
+
       <div class="grid2">
         <label class="field"><span>賞味期限</span>
           <input name="bestBefore" type="date"></label>
@@ -167,7 +181,23 @@
     </form>
   </dialog>
 
+  <!-- 書きかけの入力を戻すか聞く -->
+  <dialog id="draft-dlg" class="dlg">
+    <h2>書きかけの入力があります。続けますか？</h2>
+    <p id="draft-what"></p>
+    <div class="dlg-btns">
+      <span class="spacer"></span>
+      <button type="button" id="b-draft-discard" class="btn">捨てる</button>
+      <button type="button" id="b-draft-resume" class="btn primary">続ける</button>
+    </div>
+  </dialog>
+
   <datalist id="dl-location"></datalist>
+  <datalist id="dl-group"></datalist>
+  <datalist id="dl-amount-unit">
+    <option value="L"><option value="ml"><option value="kg"><option value="g">
+    <option value="回分"><option value="枚"><option value="食">
+  </datalist>
   <datalist id="dl-unit">
     <option value="個"><option value="本"><option value="L"><option value="枚">
     <option value="回分"><option value="食"><option value="缶"><option value="袋">

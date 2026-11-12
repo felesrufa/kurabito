@@ -5,8 +5,9 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.1.0';
+  const VERSION = '0.2.0';
   const KEY = 'kurabito:v1';
+  const DRAFT_KEY = 'kurabito:draft';
   const SCHEMA = 1;
   const GENRES = { food: '食品', bousai: '防災グッズ', daily: '日用品', other: 'その他' };
   const FIELD_LABEL = { bestBefore: '賞味期限', useBy: '使用期限' };
@@ -64,12 +65,19 @@
     if (!name) return null;
     const now = new Date().toISOString();
     const lead = num(raw.leadDays);
+    // 1つあたりの量は、数と単位がそろっているときだけ使う
+    const per = num(raw.amountPer);
+    const perUnit = str(raw.amountUnit, 10);
+    const hasAmount = per !== null && per > 0 && perUnit !== '';
     return {
       id: /^i_[a-z0-9]{4,14}$/.test(raw.id) ? raw.id : newId('i'),
       name,
       genre: Object.hasOwn(GENRES, raw.genre) ? raw.genre : 'other',
       quantity: num(raw.quantity) ?? 0,
       unit: str(raw.unit, 10),
+      group: str(raw.group, 40),
+      amountPer: hasAmount ? per : null,
+      amountUnit: hasAmount ? perUnit : '',
       minQuantity: num(raw.minQuantity),
       bestBefore: isDateStr(raw.bestBefore) ? raw.bestBefore : null,
       useBy: isDateStr(raw.useBy) ? raw.useBy : null,
@@ -295,6 +303,59 @@
     }
   }
 
+  /* ---------- 合計(まとめ名ごと) ---------- */
+  /** 比べるときの形。全角/半角の英数字・かっこ・前後の空白の違いをなくす(読みは見ない) */
+  const normKey = (s) => s.normalize('NFKC').trim();
+  const fmtNum = (n) => String(Math.round(n * 1000) / 1000);
+  // 自動で換算する単位: [そろえる先, 倍率]
+  const UNIT_CONV = {
+    ml: ['L', 0.001], 'ミリリットル': ['L', 0.001], l: ['L', 1], 'リットル': ['L', 1],
+    g: ['kg', 0.001], 'グラム': ['kg', 0.001], kg: ['kg', 1], 'キログラム': ['kg', 1],
+  };
+  /** その品の量。1つあたりの量があれば 個数×量、なければ 個数×単位 */
+  function measure(it) {
+    const amount = it.amountPer !== null ? it.quantity * it.amountPer : it.quantity;
+    const unit = normKey(it.amountPer !== null ? it.amountUnit : it.unit);
+    const conv = Object.hasOwn(UNIT_CONV, unit.toLowerCase()) ? UNIT_CONV[unit.toLowerCase()] : null;
+    return conv ? { amount: amount * conv[1], unit: conv[0] } : { amount, unit };
+  }
+
+  function computeTotals() {
+    const rows = new Map();
+    for (const it of state.items) {
+      const label = it.group || it.name;
+      const m = measure(it);
+      const key = `${normKey(label)}\n${m.unit}`;   // まとめ名も単位も同じものだけ足す
+      let row = rows.get(key);
+      if (!row) rows.set(key, row = { label: label.trim(), unit: m.unit, total: 0, count: 0, explicit: false, byLoc: new Map() });
+      row.total += m.amount;
+      row.count += 1;
+      if (it.group || it.amountPer !== null) row.explicit = true;
+      row.byLoc.set(it.location, (row.byLoc.get(it.location) || 0) + m.amount);
+    }
+    // 1品だけで、まとめ名も量も入れていないものは、一覧と同じ内容なので出さない
+    return [...rows.values()]
+      .filter((r) => r.count > 1 || r.explicit)
+      .sort((a, b) => a.label.localeCompare(b.label, 'ja') || a.unit.localeCompare(b.unit, 'ja'));
+  }
+
+  function renderTotals() {
+    const rows = computeTotals();
+    $('#totals').hidden = rows.length === 0;
+    const ul = $('#totals-list');
+    ul.replaceChildren();
+    for (const r of rows) {
+      const locs = [...r.byLoc.entries()].sort((a, b) => b[1] - a[1]);
+      const showLocs = locs.length > 1 || locs[0][0] !== '';
+      const detail = locs.map(([loc, n]) => `${loc || '置き場所なし'} ${fmtNum(n)}${r.unit}`).join('・');
+      ul.append(el('li', {}, [
+        el('span', { class: 'g', text: r.label }),
+        el('b', { text: `合計 ${fmtNum(r.total)}${r.unit}` }),
+        showLocs && el('span', { class: 'locs', text: `(${detail})` }),
+      ]));
+    }
+  }
+
   /* ---------- 一覧 ---------- */
   const nearestDue = (it) => [it.bestBefore, it.useBy].filter(Boolean).sort()[0] || null;
 
@@ -309,13 +370,14 @@
   }
 
   function renderList() {
+    renderTotals();
     const q = $('#q').value.trim().toLowerCase();
     const genre = $('#f-genre').value;
     const sort = $('#f-sort').value;
     let rows = state.items.filter((it) => {
       if (genre && it.genre !== genre) return false;
       if (!q) return true;
-      return [it.name, it.location, it.memo, it.maker, it.model, it.size].some((v) => v.toLowerCase().includes(q));
+      return [it.name, it.group, it.location, it.memo, it.maker, it.model, it.size].some((v) => v.toLowerCase().includes(q));
     });
     const byName = (a, b) => a.name.localeCompare(b.name, 'ja');
     const sorters = {
@@ -344,6 +406,8 @@
         duePill(it),
         el('span', { class: 'pill genre', text: GENRES[it.genre] }),
         it.location && el('span', { class: 'where', text: it.location }),
+        it.group && el('span', { class: 'where', text: `まとめ: ${it.group}` }),
+        it.amountPer !== null && el('span', { class: 'where', text: `1${it.unit || 'つ'}あたり ${fmtNum(it.amountPer)}${it.amountUnit}` }),
         it.size && el('span', { class: 'where', text: `サイズ ${it.size}` }),
       ]);
       const main = el('button', { type: 'button', class: 'main', 'aria-label': `${it.name} を編集`, on: { click: () => openForm(it) } }, [
@@ -370,7 +434,50 @@
   const form = $('#item-form');
   let editingId = null;
 
-  function openForm(item) {
+  const FIELDS = ['name', 'genre', 'location', 'quantity', 'unit', 'minQuantity', 'group', 'amountPer', 'amountUnit', 'bestBefore', 'useBy', 'reviewAt', 'leadDays', 'maker', 'model', 'size', 'memo'];
+
+  /* 入力途中の下書き。別のアプリに移っている間にアプリが閉じられても、続きから書けるようにする */
+  function saveDraft() {
+    if (!dlg.open) return;
+    const values = {};
+    for (const name of FIELDS) values[name] = form.elements[name].value;
+    try {
+      localStorage.setItem(DRAFT_KEY, JSON.stringify({ editingId, values, savedAt: new Date().toISOString() }));
+    } catch { /* 下書きは保存できなくても先へ進む */ }
+  }
+  function clearDraft() {
+    try { localStorage.removeItem(DRAFT_KEY); } catch { /* noop */ }
+  }
+  function loadDraft() {
+    try {
+      const d = JSON.parse(localStorage.getItem(DRAFT_KEY));
+      if (!d || typeof d !== 'object' || !d.values || typeof d.values !== 'object') return null;
+      const values = {};
+      for (const name of FIELDS) values[name] = typeof d.values[name] === 'string' ? d.values[name].slice(0, 500) : '';
+      if (!Object.hasOwn(GENRES, values.genre)) values.genre = 'other';
+      if (!Object.values(values).some((v, i) => v && FIELDS[i] !== 'genre')) return null;
+      return {
+        item: state.items.find((it) => it.id === d.editingId) || null,
+        values,
+        savedAt: typeof d.savedAt === 'string' ? new Date(d.savedAt) : null,
+      };
+    } catch {
+      return null;
+    }
+  }
+  function offerDraft() {
+    const d = loadDraft();
+    if (!d) return clearDraft();
+    const when = d.savedAt && !Number.isNaN(d.savedAt.getTime())
+      ? ` ・ ${d.savedAt.getMonth() + 1}月${d.savedAt.getDate()}日 ${d.savedAt.getHours()}:${pad(d.savedAt.getMinutes())}`
+      : '';
+    $('#draft-what').textContent = `「${d.values.name || '(品名なし)'}」を${d.item ? '編集' : '追加'}している途中でした${when}`;
+    $('#b-draft-resume').onclick = () => { $('#draft-dlg').close(); openForm(d.item, d.values); };
+    $('#b-draft-discard').onclick = () => { $('#draft-dlg').close(); clearDraft(); };
+    $('#draft-dlg').showModal();
+  }
+
+  function openForm(item, draft) {
     editingId = item ? item.id : null;
     $('#dlg-title').textContent = item ? '品を編集' : '品を追加';
     $('#b-delete').hidden = !item;
@@ -378,14 +485,16 @@
     form.reset();
     const f = form.elements;
     const v = item || { genre: 'food', quantity: 1 };
-    for (const name of ['name', 'genre', 'location', 'quantity', 'unit', 'minQuantity', 'bestBefore', 'useBy', 'reviewAt', 'leadDays', 'maker', 'model', 'size', 'memo']) {
-      f[name].value = v[name] ?? '';
-    }
-    form.querySelector('.more').open = Boolean(item && (item.maker || item.model || item.size || item.memo));
+    for (const name of FIELDS) f[name].value = draft ? draft[name] : (v[name] ?? '');
+    form.querySelector('.more').open = Boolean(f.maker.value || f.model.value || f.size.value || f.memo.value);
     const dl = $('#dl-location');
     dl.replaceChildren(...[...new Set(state.items.map((it) => it.location).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ja')).map((loc) => el('option', { value: loc })));
+    // まとめ名の候補: 使ったことのあるまとめ名(全角/半角だけの違いは1つにまとめる)
+    const groups = new Map();
+    for (const it of state.items) if (it.group && !groups.has(normKey(it.group))) groups.set(normKey(it.group), it.group);
+    $('#dl-group').replaceChildren(...[...groups.values()].sort((a, b) => a.localeCompare(b, 'ja')).map((g) => el('option', { value: g })));
     dlg.showModal();
-    if (!item) f.name.focus();
+    if (!item && !draft) f.name.focus();
   }
 
   form.addEventListener('submit', (ev) => {
@@ -394,14 +503,18 @@
     const err = $('#form-error');
     const fail = (msg, field) => { err.textContent = msg; err.hidden = false; field?.focus(); };
     if (!f.name.value.trim()) return fail('品名を入れてください。', f.name);
-    for (const name of ['quantity', 'minQuantity', 'leadDays']) {
+    for (const name of ['quantity', 'minQuantity', 'leadDays', 'amountPer']) {
       if (f[name].value !== '' && num(f[name].value) === null) return fail('数は0以上の数字で入れてください。', f[name]);
     }
+    const hasPer = Number(f.amountPer.value) > 0;
+    if (hasPer && !f.amountUnit.value.trim()) return fail('「1つあたりの量」の単位を入れてください(L、ml、回分 など)。', f.amountUnit);
+    if (!hasPer && f.amountUnit.value.trim()) return fail('「1つあたりの量」の数を入れてください。使わないときは、量の単位も空にしてください。', f.amountPer);
     const old = state.items.find((it) => it.id === editingId);
     const item = sanitizeItem({
       ...(old || {}),
       name: f.name.value, genre: f.genre.value, location: f.location.value,
       quantity: f.quantity.value === '' ? 0 : f.quantity.value, unit: f.unit.value, minQuantity: f.minQuantity.value,
+      group: f.group.value, amountPer: f.amountPer.value, amountUnit: f.amountUnit.value,
       bestBefore: f.bestBefore.value, useBy: f.useBy.value, reviewAt: f.reviewAt.value, leadDays: f.leadDays.value,
       maker: f.maker.value, model: f.model.value, size: f.size.value, memo: f.memo.value,
       updatedAt: new Date().toISOString(),
@@ -422,7 +535,12 @@
     if (!n) return;
     const input = form.elements.quantity;
     input.value = String(Math.max(0, Math.round(((num(input.value) ?? 0) + n) * 1000) / 1000));
+    saveDraft();
   });
+  // 入力するたびに下書きを保存。保存・やめる・削除で画面を閉じたら捨てる
+  form.addEventListener('input', saveDraft);
+  form.addEventListener('change', saveDraft);
+  dlg.addEventListener('close', clearDraft);
   $('#b-cancel').addEventListener('click', () => dlg.close());
   $('#b-delete').addEventListener('click', () => {
     const it = state.items.find((x) => x.id === editingId);
@@ -568,6 +686,7 @@
       if (!confirm('この端末のkurabitoのデータをすべて消します。元に戻せません。')) return;
       if (!confirm('本当に消しますか？ バックアップは書き出しましたか？')) return;
       localStorage.removeItem(KEY);
+      clearDraft();
       state = normalize(null);
       renderAll();
       toast('すべて消しました');
@@ -577,6 +696,7 @@
 
     renderAll();
     renderPersist();
+    offerDraft();
     if ('serviceWorker' in navigator && location.protocol === 'https:') {
       navigator.serviceWorker.register('sw.js').catch(() => {});
     }
