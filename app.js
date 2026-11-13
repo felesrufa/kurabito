@@ -5,11 +5,15 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.2.0';
+  const VERSION = '0.3.0';
   const KEY = 'kurabito:v1';
   const DRAFT_KEY = 'kurabito:draft';
   const SCHEMA = 1;
-  const GENRES = { food: '食品', bousai: '防災グッズ', daily: '日用品', other: 'その他' };
+  // 最初の4つのジャンル。識別子は変えない・消せない(名前は変えられる)。「その他」は行き先の受け皿
+  const BUILTIN_GENRES = [['food', '食品'], ['bousai', '防災グッズ'], ['daily', '日用品'], ['other', 'その他']];
+  const isBuiltinGenre = (id) => BUILTIN_GENRES.some(([b]) => b === id);
+  const GENRE_NAME_MAX = 20;
+  const GENRE_MAX = 50;
   const FIELD_LABEL = { bestBefore: '賞味期限', useBy: '使用期限' };
   const BACKUP_EVERY_DAYS = 60;
 
@@ -59,7 +63,33 @@
     return `${prefix}_${a[0].toString(36)}${a[1].toString(36)}`.slice(0, 14);
   };
 
-  function sanitizeItem(raw) {
+  /** 比べるときの形。全角/半角の英数字・かっこ・前後の空白の違いをなくす(読みは見ない) */
+  const normKey = (s) => s.normalize('NFKC').trim();
+
+  /** ジャンルの一覧を整える。一覧がない古いデータは最初の4つだけにする */
+  function sanitizeGenres(raw) {
+    const out = [];
+    const ids = new Set();
+    const names = new Set();
+    const add = (id, name) => {
+      // 同じ名前が紛れていたら、後ろに番号を付けて区別する(品のひも付けを切らないため)
+      let label = name;
+      for (let n = 2; names.has(normKey(label)); n += 1) label = `${name.slice(0, GENRE_NAME_MAX - 3)}(${n})`;
+      ids.add(id);
+      names.add(normKey(label));
+      out.push({ id, name: label });
+    };
+    for (const g of Array.isArray(raw) ? raw : []) {
+      if (!g || typeof g !== 'object' || typeof g.id !== 'string' || ids.has(g.id)) continue;
+      if (!isBuiltinGenre(g.id) && (!/^g_[a-z0-9]{4,14}$/.test(g.id) || out.length >= GENRE_MAX)) continue;
+      const name = str(g.name, GENRE_NAME_MAX);
+      if (name) add(g.id, name);
+    }
+    for (const [id, name] of BUILTIN_GENRES) if (!ids.has(id)) add(id, name);
+    return out;
+  }
+
+  function sanitizeItem(raw, genreIds) {
     if (!raw || typeof raw !== 'object') return null;
     const name = str(raw.name, 80);
     if (!name) return null;
@@ -72,7 +102,7 @@
     return {
       id: /^i_[a-z0-9]{4,14}$/.test(raw.id) ? raw.id : newId('i'),
       name,
-      genre: Object.hasOwn(GENRES, raw.genre) ? raw.genre : 'other',
+      genre: genreIds.has(raw.genre) ? raw.genre : 'other',
       quantity: num(raw.quantity) ?? 0,
       unit: str(raw.unit, 10),
       group: str(raw.group, 40),
@@ -100,8 +130,10 @@
     const lead = num(s.leadDays);
     const plan = num(s.planDays);
     const seen = new Set();
+    const genres = sanitizeGenres(d.genres);
+    const genreIds = new Set(genres.map((g) => g.id));
     const items = (Array.isArray(d.items) ? d.items : [])
-      .map(sanitizeItem)
+      .map((it) => sanitizeItem(it, genreIds))
       .filter((it) => it && !seen.has(it.id) && seen.add(it.id));
     const alerts = {};
     if (d.alerts && typeof d.alerts === 'object') {
@@ -123,6 +155,7 @@
         planDays: plan === null ? 7 : Math.min(60, Math.max(1, Math.round(plan))),
         lastExportAt: isDateStr(s.lastExportAt) ? s.lastExportAt : null,
       },
+      genres,
       items,
       alerts,
       people: keep(d.people),
@@ -142,6 +175,9 @@
   }
 
   let state = load();
+
+  const genreIds = () => new Set(state.genres.map((g) => g.id));
+  const genreName = (id) => (state.genres.find((g) => g.id === id) || state.genres.find((g) => g.id === 'other')).name;
 
   function pruneAlerts() {
     const byId = new Map(state.items.map((it) => [it.id, it]));
@@ -304,8 +340,6 @@
   }
 
   /* ---------- 合計(まとめ名ごと) ---------- */
-  /** 比べるときの形。全角/半角の英数字・かっこ・前後の空白の違いをなくす(読みは見ない) */
-  const normKey = (s) => s.normalize('NFKC').trim();
   const fmtNum = (n) => String(Math.round(n * 1000) / 1000);
   // 自動で換算する単位: [そろえる先, 倍率]
   const UNIT_CONV = {
@@ -404,7 +438,7 @@
       const short = it.minQuantity !== null && it.quantity < it.minQuantity;
       const meta = el('div', { class: 'meta' }, [
         duePill(it),
-        el('span', { class: 'pill genre', text: GENRES[it.genre] }),
+        el('span', { class: 'pill genre', text: genreName(it.genre) }),
         it.location && el('span', { class: 'where', text: it.location }),
         it.group && el('span', { class: 'where', text: `まとめ: ${it.group}` }),
         it.amountPer !== null && el('span', { class: 'where', text: `1${it.unit || 'つ'}あたり ${fmtNum(it.amountPer)}${it.amountUnit}` }),
@@ -454,7 +488,7 @@
       if (!d || typeof d !== 'object' || !d.values || typeof d.values !== 'object') return null;
       const values = {};
       for (const name of FIELDS) values[name] = typeof d.values[name] === 'string' ? d.values[name].slice(0, 500) : '';
-      if (!Object.hasOwn(GENRES, values.genre)) values.genre = 'other';
+      if (!genreIds().has(values.genre)) values.genre = 'other';   // 消されたジャンルは「その他」として戻す
       if (!Object.values(values).some((v, i) => v && FIELDS[i] !== 'genre')) return null;
       return {
         item: state.items.find((it) => it.id === d.editingId) || null,
@@ -475,6 +509,11 @@
     $('#b-draft-resume').onclick = () => { $('#draft-dlg').close(); openForm(d.item, d.values); };
     $('#b-draft-discard').onclick = () => { $('#draft-dlg').close(); clearDraft(); };
     $('#draft-dlg').showModal();
+  }
+
+  function closeForm() {
+    clearDraft();
+    dlg.close();
   }
 
   function openForm(item, draft) {
@@ -518,12 +557,12 @@
       bestBefore: f.bestBefore.value, useBy: f.useBy.value, reviewAt: f.reviewAt.value, leadDays: f.leadDays.value,
       maker: f.maker.value, model: f.model.value, size: f.size.value, memo: f.memo.value,
       updatedAt: new Date().toISOString(),
-    });
+    }, genreIds());
     if (old) state.items[state.items.indexOf(old)] = item; else state.items.push(item);
     // 数を直したら、在庫不足のスヌーズは解除する
     if (old && old.quantity !== item.quantity) delete state.alerts[`${item.id}|low|`];
     if (save()) {
-      dlg.close();
+      closeForm();
       renderAll();
       toast(old ? '保存しました' : '登録しました');
       requestPersist();
@@ -540,14 +579,15 @@
   // 入力するたびに下書きを保存。保存・やめる・削除で画面を閉じたら捨てる
   form.addEventListener('input', saveDraft);
   form.addEventListener('change', saveDraft);
+  // close の知らせは少し遅れて届くので、ボタンで閉じるときはその場でも捨てる(closeForm)
   dlg.addEventListener('close', clearDraft);
-  $('#b-cancel').addEventListener('click', () => dlg.close());
+  $('#b-cancel').addEventListener('click', () => closeForm());
   $('#b-delete').addEventListener('click', () => {
     const it = state.items.find((x) => x.id === editingId);
     if (!it || !confirm(`「${it.name}」を削除します。よろしいですか？`)) return;
     state.items = state.items.filter((x) => x.id !== editingId);
     save();
-    dlg.close();
+    closeForm();
     renderAll();
     toast('削除しました');
   });
@@ -622,7 +662,112 @@
         : 'ブラウザで開いています。「ホーム画面に追加」して使うと、データが消えにくくなります。';
   }
 
+  /* ---------- ジャンル ---------- */
+  /** 絞り込みと登録画面の選択肢を、保存されたジャンルから作り直す(選んでいた値は保つ) */
+  function renderGenreOptions() {
+    const filter = $('#f-genre');
+    const pick = form.elements.genre;
+    const ids = genreIds();
+    for (const [sel, fallback] of [[filter, ''], [pick, 'other']]) {
+      const cur = sel.value;
+      const opts = state.genres.map((g) => el('option', { value: g.id, text: g.name }));
+      if (sel === filter) opts.unshift(el('option', { value: '', text: 'すべてのジャンル' }));
+      sel.replaceChildren(...opts);
+      sel.value = ids.has(cur) ? cur : fallback;
+    }
+  }
+
+  /** 名前が使えるか。使えないときは理由を返す(同じ名前の基準は、合計のまとめ名と同じ) */
+  function genreNameProblem(name, selfId) {
+    if (!name) return 'ジャンルの名前を入れてください。';
+    if (state.genres.some((g) => g.id !== selfId && normKey(g.name) === normKey(name))) return '同じ名前のジャンルがあります。';
+    return null;
+  }
+
+  function addGenre() {
+    const input = $('#g-new');
+    const name = str(input.value, GENRE_NAME_MAX);
+    const problem = state.genres.length >= GENRE_MAX ? 'ジャンルはこれ以上増やせません。' : genreNameProblem(name, null);
+    if (problem) { toast(problem); input.focus(); return; }
+    let id = newId('g');
+    while (genreIds().has(id)) id = newId('g');
+    // 「その他」が最後にあるなら、その手前に入れる
+    const last = state.genres.length - 1;
+    state.genres.splice(state.genres[last].id === 'other' ? last : last + 1, 0, { id, name });
+    input.value = '';
+    save();
+    renderAll();
+    toast(`「${name}」を追加しました`);
+  }
+
+  function renameGenre(g, input) {
+    const name = str(input.value, GENRE_NAME_MAX);
+    if (name === g.name) { input.value = g.name; return; }
+    const problem = genreNameProblem(name, g.id);
+    if (problem) { input.value = g.name; toast(`${problem}元の名前に戻しました。`); return; }
+    g.name = name;
+    input.value = name;
+    save();
+    // 欄は作り直さない(続けて隣のボタンを押したときに、押したボタンが消えないように)
+    renderGenreOptions();
+    renderList();
+    toast('名前を変えました');
+  }
+
+  function moveGenre(index, delta) {
+    const to = index + delta;
+    if (to < 0 || to >= state.genres.length) return;
+    const [g] = state.genres.splice(index, 1);
+    state.genres.splice(to, 0, g);
+    save();
+    renderAll();
+    $(`#genre-list li:nth-child(${to + 1}) button[data-move="${delta}"]`)?.focus();
+  }
+
+  function deleteGenre(g) {
+    if (isBuiltinGenre(g.id)) return;
+    const used = state.items.filter((it) => it.genre === g.id);
+    if (used.length && !confirm(`「${g.name}」には ${used.length}品 あります。「${genreName('other')}」に移して消しますか？`)) return;
+    const index = state.genres.indexOf(g);
+    for (const it of used) it.genre = 'other';
+    state.genres = state.genres.filter((x) => x.id !== g.id);
+    save();
+    renderAll();
+    toast(used.length ? `「${g.name}」を消し、${used.length}品を移しました` : `「${g.name}」を消しました`, {
+      label: '取り消す',
+      fn: () => {
+        if (!genreIds().has(g.id)) state.genres.splice(Math.min(index, state.genres.length), 0, g);
+        for (const it of used) if (state.items.includes(it) && it.genre === 'other') it.genre = g.id;
+        save();
+        renderAll();
+      },
+    });
+  }
+
+  function renderGenres() {
+    const ul = $('#genre-list');
+    if (ul.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return; // 名前を書いている途中は作り直さない
+    const counts = new Map();
+    for (const it of state.items) counts.set(it.genre, (counts.get(it.genre) || 0) + 1);
+    ul.replaceChildren(...state.genres.map((g, i) => {
+      const fixed = isBuiltinGenre(g.id);
+      const input = el('input', { value: g.name, maxlength: GENRE_NAME_MAX, autocomplete: 'off', 'aria-label': `「${g.name}」の名前` });
+      input.addEventListener('change', () => renameGenre(g, input));
+      input.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') input.blur(); });
+      return el('li', {}, [
+        input,
+        el('span', { class: 'count', text: `${counts.get(g.id) || 0}品` }),
+        el('button', { type: 'button', class: 'step', text: '↑', 'data-move': -1, disabled: i === 0, 'aria-label': `「${g.name}」を上へ`, on: { click: () => moveGenre(i, -1) } }),
+        el('button', { type: 'button', class: 'step', text: '↓', 'data-move': 1, disabled: i === state.genres.length - 1, 'aria-label': `「${g.name}」を下へ`, on: { click: () => moveGenre(i, 1) } }),
+        fixed
+          ? el('span', { class: 'fixed', text: '消せません' })
+          : el('button', { type: 'button', class: 'btn small warn', text: '削除', 'aria-label': `「${g.name}」を削除`, on: { click: () => deleteGenre(g) } }),
+      ]);
+    }));
+  }
+
   function renderSettings() {
+    renderGenres();
     $('#s-lead').value = String(state.settings.leadDays);
     const last = state.settings.lastExportAt;
     $('#last-export').textContent = last ? `最後の書き出し: ${fmtDate(last)}` : 'まだ書き出していません。';
@@ -648,6 +793,7 @@
   function renderAll() {
     const now = new Date();
     $('#today').textContent = `${now.getMonth() + 1}月${now.getDate()}日(${'日月火水木金土'[now.getDay()]})`;
+    renderGenreOptions();
     renderTodo();
     renderList();
     renderSettings();
@@ -663,9 +809,8 @@
   }
 
   function init() {
-    for (const sel of [$('#f-genre'), form.elements.genre]) {
-      for (const [value, label] of Object.entries(GENRES)) sel.append(el('option', { value, text: label }));
-    }
+    $('#g-add').addEventListener('click', addGenre);
+    $('#g-new').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); addGenre(); } });
     document.querySelector('.tabs').addEventListener('click', (ev) => {
       const view = ev.target.closest('button')?.dataset.view;
       if (view) showView(view);

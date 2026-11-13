@@ -41,7 +41,6 @@
         <input type="search" id="q" placeholder="品名・置き場所・メモで探す" autocomplete="off">
         <div class="row">
           <select id="f-genre" aria-label="ジャンル">
-            <option value="">すべてのジャンル</option>
           </select>
           <select id="f-sort" aria-label="並び順">
             <option value="due">期限が近い順</option>
@@ -66,6 +65,16 @@
           <input type="number" id="s-lead" min="0" max="365" inputmode="numeric">
         </label>
         <p class="hint">品目ごとに変えたいときは、その品の編集画面で指定できます。</p>
+      </div>
+
+      <div class="panel">
+        <h3>ジャンル</h3>
+        <p class="hint">名前はその場で書き換えられます。↑↓で並べ替え。最初の4つは消せません。</p>
+        <ul id="genre-list" class="genres"></ul>
+        <div class="genre-add">
+          <input id="g-new" maxlength="20" placeholder="新しいジャンルの名前" autocomplete="off" aria-label="新しいジャンルの名前">
+          <button type="button" id="g-add" class="btn primary">追加</button>
+        </div>
       </div>
 
       <div class="panel">

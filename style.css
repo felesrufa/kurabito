@@ -164,6 +164,13 @@ input:focus, select:focus, textarea:focus, .btn:focus-visible, .tabs button:focu
   border-radius: var(--radius); padding: 12px 14px; margin: 12px 0;
 }
 .panel h3 { margin: 0 0 6px; font-size: 1rem; }
+.genres { list-style: none; margin: 0 0 10px; padding: 0; display: grid; gap: 8px; }
+.genres li { display: grid; grid-template-columns: minmax(0, 1fr) auto 40px 40px 4.6em; gap: 6px; align-items: center; }
+.genres .count { color: var(--muted); font-size: .82rem; white-space: nowrap; min-width: 2.6em; text-align: right; }
+.genres .fixed { color: var(--muted); font-size: .72rem; text-align: center; }
+.genres .btn.small { padding: 6px 8px; }
+.step:disabled { opacity: .35; cursor: default; }
+.genre-add { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
 .panel.danger { border-color: var(--warn-text); }
 
 /* フォーム */

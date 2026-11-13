@@ -2,7 +2,7 @@
  * アプリ本体を端末に保存して、電波がなくても開けるようにする。
  * 取りに行くのは自分自身のファイルだけ。持ち物のデータには触らない。
  */
-const CACHE = 'kurabito-0.2.0';
+const CACHE = 'kurabito-0.3.0';
 const FILES = [
   './',
   'index.html',
