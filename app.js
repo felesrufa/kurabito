@@ -5,7 +5,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.3.0';
+  const VERSION = '0.4.0';
   const KEY = 'kurabito:v1';
   const DRAFT_KEY = 'kurabito:draft';
   const SCHEMA = 1;
@@ -14,6 +14,10 @@
   const isBuiltinGenre = (id) => BUILTIN_GENRES.some(([b]) => b === id);
   const GENRE_NAME_MAX = 20;
   const GENRE_MAX = 50;
+  // 買い物の印。'' = なし。在庫の数え方には関わらない(数量だけで数える)
+  const MARKS = { buy: '買いたい', avoid: 'もう買わない' };
+  const REASON_MAX = 10000;   // 読み込み時だけ切る。画面では制限しない
+  const LOC_NONE = ' ';       // 置き場所の絞り込みで「置き場所なし」を表す値(置き場所は前後の空白を取るので重ならない)
   const FIELD_LABEL = { bestBefore: '賞味期限', useBy: '使用期限' };
   const BACKUP_EVERY_DAYS = 60;
 
@@ -99,6 +103,7 @@
     const per = num(raw.amountPer);
     const perUnit = str(raw.amountUnit, 10);
     const hasAmount = per !== null && per > 0 && perUnit !== '';
+    const mark = Object.hasOwn(MARKS, raw.mark) ? raw.mark : '';
     return {
       id: /^i_[a-z0-9]{4,14}$/.test(raw.id) ? raw.id : newId('i'),
       name,
@@ -109,6 +114,8 @@
       amountPer: hasAmount ? per : null,
       amountUnit: hasAmount ? perUnit : '',
       minQuantity: num(raw.minQuantity),
+      mark,
+      avoidReason: mark === 'avoid' ? str(raw.avoidReason, REASON_MAX) : '',   // 空でも読み込みは弾かない
       bestBefore: isDateStr(raw.bestBefore) ? raw.bestBefore : null,
       useBy: isDateStr(raw.useBy) ? raw.useBy : null,
       reviewAt: isDateStr(raw.reviewAt) ? raw.reviewAt : null,
@@ -205,17 +212,20 @@
   }
 
   /* ---------- 対応待ち ---------- */
+  /** 買い足しの目安を下回っているか。すでに「買いたい」「もう買わない」の品には出さない */
+  const isShort = (it) => it.mark === '' && it.minQuantity !== null && it.quantity < it.minQuantity;
+
   function computeAlerts() {
     const today = todayStr();
     const all = [];
     for (const it of state.items) {
       const lead = it.leadDays ?? state.settings.leadDays;
       for (const field of ['bestBefore', 'useBy']) {
-        if (!it[field]) continue;
+        if (!it[field] || it.quantity === 0) continue;   // 手元にない品の期限は知らせない
         const left = dayDiff(today, it[field]);
         if (left <= lead) all.push({ key: `${it.id}|${field}|${it[field]}`, type: 'expiry', field, item: it, left });
       }
-      if (it.minQuantity !== null && it.quantity < it.minQuantity) {
+      if (isShort(it)) {
         all.push({ key: `${it.id}|low|`, type: 'low', item: it, left: 1e6 });
       }
       if (it.reviewAt && dayDiff(today, it.reviewAt) <= 0) {
@@ -354,14 +364,18 @@
     return conv ? { amount: amount * conv[1], unit: conv[0] } : { amount, unit };
   }
 
-  function computeTotals() {
+  /** その品が入る合計の行。まとめ名も単位も同じものだけ足す */
+  const totalKey = (it) => `${normKey(it.group || it.name)}\n${measure(it).unit}`;
+
+  function computeTotals(items) {
     const rows = new Map();
-    for (const it of state.items) {
+    for (const it of items) {
+      if (it.quantity === 0) continue;   // 足しても変わらないので、行を作らない
       const label = it.group || it.name;
       const m = measure(it);
-      const key = `${normKey(label)}\n${m.unit}`;   // まとめ名も単位も同じものだけ足す
+      const key = totalKey(it);
       let row = rows.get(key);
-      if (!row) rows.set(key, row = { label: label.trim(), unit: m.unit, total: 0, count: 0, explicit: false, byLoc: new Map() });
+      if (!row) rows.set(key, row = { key, label: label.trim(), unit: m.unit, total: 0, count: 0, explicit: false, byLoc: new Map() });
       row.total += m.amount;
       row.count += 1;
       if (it.group || it.amountPer !== null) row.explicit = true;
@@ -373,20 +387,30 @@
       .sort((a, b) => a.label.localeCompare(b.label, 'ja') || a.unit.localeCompare(b.unit, 'ja'));
   }
 
-  function renderTotals() {
-    const rows = computeTotals();
-    $('#totals').hidden = rows.length === 0;
+  // 合計の行をタップして選んだまとめ({ key, label, unit })。null = 絞り込みなし
+  let groupFilter = null;
+
+  function renderTotals(items, filtering) {
+    const rows = computeTotals(items);
+    $('#totals').hidden = rows.length === 0 && !filtering;
+    $('#totals-title').textContent = filtering ? '絞り込み中の合計' : 'まとめ名ごとの合計';
     const ul = $('#totals-list');
     ul.replaceChildren();
+    if (rows.length === 0) ul.append(el('li', { class: 'none', text: '合計する品がありません。' }));
     for (const r of rows) {
       const locs = [...r.byLoc.entries()].sort((a, b) => b[1] - a[1]);
       const showLocs = locs.length > 1 || locs[0][0] !== '';
       const detail = locs.map(([loc, n]) => `${loc || '置き場所なし'} ${fmtNum(n)}${r.unit}`).join('・');
-      ul.append(el('li', {}, [
+      const on = groupFilter?.key === r.key;
+      ul.append(el('li', {}, [el('button', {
+        type: 'button', 'aria-pressed': String(on),
+        'aria-label': on ? `${r.label} の絞り込みを解除` : `${r.label} だけに絞り込む`,
+        on: { click: () => { groupFilter = on ? null : { key: r.key, label: r.label, unit: r.unit }; renderList(); } },
+      }, [
         el('span', { class: 'g', text: r.label }),
         el('b', { text: `合計 ${fmtNum(r.total)}${r.unit}` }),
         showLocs && el('span', { class: 'locs', text: `(${detail})` }),
-      ]));
+      ])]));
     }
   }
 
@@ -403,16 +427,40 @@
     return el('span', { class: 'pill ok', text: `${fmtDate(due)}まで` });
   }
 
+  /** 置き場所の選択欄を、登録済みの品の置き場所から作り直す(表記ゆれは吸収しない) */
+  function renderLocationOptions() {
+    const sel = $('#f-location');
+    const cur = sel.value;
+    const locs = [...new Set(state.items.map((it) => it.location).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ja'));
+    sel.replaceChildren(
+      el('option', { value: '', text: 'すべての置き場所' }),
+      el('option', { value: LOC_NONE, text: '置き場所なし' }),
+      ...locs.map((loc) => el('option', { value: loc, text: loc })),
+    );
+    sel.value = cur === LOC_NONE || locs.includes(cur) ? cur : '';
+  }
+
   function renderList() {
-    renderTotals();
+    renderLocationOptions();
     const q = $('#q').value.trim().toLowerCase();
     const genre = $('#f-genre').value;
+    const loc = $('#f-location').value;
+    const mark = $('#f-mark').value;
     const sort = $('#f-sort').value;
+    const filtering = Boolean(q || genre || loc || mark || groupFilter);
     let rows = state.items.filter((it) => {
       if (genre && it.genre !== genre) return false;
+      if (loc && it.location !== (loc === LOC_NONE ? '' : loc)) return false;
+      if (mark && it.mark !== mark) return false;
+      if (groupFilter && totalKey(it) !== groupFilter.key) return false;
       if (!q) return true;
-      return [it.name, it.group, it.location, it.memo, it.maker, it.model, it.size].some((v) => v.toLowerCase().includes(q));
+      return [it.name, it.group, it.location, it.memo, it.maker, it.model, it.size, it.avoidReason].some((v) => v.toLowerCase().includes(q));
     });
+    // 合計は、絞り込んだ品だけで出す
+    renderTotals(rows, filtering);
+    const chip = $('#group-chip');
+    chip.hidden = !groupFilter;
+    if (groupFilter) $('#group-chip-clear').textContent = `まとめ名:${groupFilter.label}${groupFilter.unit ? `(${groupFilter.unit})` : ''} ✕`;
     const byName = (a, b) => a.name.localeCompare(b.name, 'ja');
     const sorters = {
       due: (a, b) => (nearestDue(a) || '9999').localeCompare(nearestDue(b) || '9999') || byName(a, b),
@@ -430,13 +478,14 @@
     if (rows.length === 0) {
       ul.append(el('li', { class: 'empty' }, [
         el('strong', { text: state.items.length ? '当てはまる品がありません' : 'まだ何も登録されていません' }),
-        el('span', { text: state.items.length ? '検索の言葉やジャンルを変えてみてください。' : '右下の「＋」から登録できます。' }),
+        el('span', { text: state.items.length ? '検索の言葉や絞り込みを変えてみてください。' : '右下の「＋」から登録できます。' }),
       ]));
       return;
     }
     for (const it of rows) {
-      const short = it.minQuantity !== null && it.quantity < it.minQuantity;
+      const short = isShort(it);
       const meta = el('div', { class: 'meta' }, [
+        it.mark && el('span', { class: `pill ${it.mark}`, text: MARKS[it.mark] }),
         duePill(it),
         el('span', { class: 'pill genre', text: genreName(it.genre) }),
         it.location && el('span', { class: 'where', text: it.location }),
@@ -446,6 +495,7 @@
       ]);
       const main = el('button', { type: 'button', class: 'main', 'aria-label': `${it.name} を編集`, on: { click: () => openForm(it) } }, [
         el('div', { class: 'name', text: it.name }),
+        it.mark === 'avoid' && it.avoidReason && el('div', { class: 'reason', text: `理由: ${it.avoidReason}` }),
         meta,
       ]);
       const step = (n) => () => {
@@ -459,7 +509,10 @@
         el('b', { class: short ? 'short' : '', text: qtyText(it) }),
         el('button', { type: 'button', class: 'step', text: '＋', 'aria-label': `${it.name} を1つ増やす`, on: { click: step(1) } }),
       ]);
-      ul.append(el('li', { class: 'item' }, [main, qty]));
+      const bought = it.mark === 'buy' && el('div', { class: 'row-actions' }, [
+        el('button', { type: 'button', class: 'btn small primary', text: '買った', 'aria-label': `${it.name} を買った`, on: { click: () => openForm(it, null, true) } }),
+      ]);
+      ul.append(el('li', { class: 'item' }, [main, qty, bought]));
     }
   }
 
@@ -468,7 +521,7 @@
   const form = $('#item-form');
   let editingId = null;
 
-  const FIELDS = ['name', 'genre', 'location', 'quantity', 'unit', 'minQuantity', 'group', 'amountPer', 'amountUnit', 'bestBefore', 'useBy', 'reviewAt', 'leadDays', 'maker', 'model', 'size', 'memo'];
+  const FIELDS = ['name', 'genre', 'location', 'quantity', 'unit', 'minQuantity', 'group', 'amountPer', 'amountUnit', 'mark', 'avoidReason', 'bestBefore', 'useBy', 'reviewAt', 'leadDays', 'maker', 'model', 'size', 'memo'];
 
   /* 入力途中の下書き。別のアプリに移っている間にアプリが閉じられても、続きから書けるようにする */
   function saveDraft() {
@@ -487,7 +540,8 @@
       const d = JSON.parse(localStorage.getItem(DRAFT_KEY));
       if (!d || typeof d !== 'object' || !d.values || typeof d.values !== 'object') return null;
       const values = {};
-      for (const name of FIELDS) values[name] = typeof d.values[name] === 'string' ? d.values[name].slice(0, 500) : '';
+      for (const name of FIELDS) values[name] = typeof d.values[name] === 'string' ? d.values[name].slice(0, name === 'avoidReason' ? REASON_MAX : 500) : '';
+      if (!Object.hasOwn(MARKS, values.mark)) values.mark = '';
       if (!genreIds().has(values.genre)) values.genre = 'other';   // 消されたジャンルは「その他」として戻す
       if (!Object.values(values).some((v, i) => v && FIELDS[i] !== 'genre')) return null;
       return {
@@ -516,15 +570,26 @@
     dlg.close();
   }
 
-  function openForm(item, draft) {
+  /** 理由の欄は「もう買わない」のときだけ出す */
+  function syncMark() {
+    $('#avoid-field').hidden = form.elements.mark.value !== 'avoid';
+  }
+
+  /** bought = true は一覧の「買った」から。印を外した状態で出すだけで、保存するまで何も変えない */
+  function openForm(item, draft, bought) {
     editingId = item ? item.id : null;
-    $('#dlg-title').textContent = item ? '品を編集' : '品を追加';
+    $('#dlg-title').textContent = bought ? '買った品を確かめて保存' : item ? '品を編集' : '品を追加';
     $('#b-delete').hidden = !item;
     $('#form-error').hidden = true;
     form.reset();
     const f = form.elements;
     const v = item || { genre: 'food', quantity: 1 };
     for (const name of FIELDS) f[name].value = draft ? draft[name] : (v[name] ?? '');
+    if (bought) {
+      f.mark.value = '';
+      if (!(num(f.quantity.value) > 0)) f.quantity.value = '1';
+    }
+    syncMark();
     form.querySelector('.more').open = Boolean(f.maker.value || f.model.value || f.size.value || f.memo.value);
     const dl = $('#dl-location');
     dl.replaceChildren(...[...new Set(state.items.map((it) => it.location).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'ja')).map((loc) => el('option', { value: loc })));
@@ -548,12 +613,14 @@
     const hasPer = Number(f.amountPer.value) > 0;
     if (hasPer && !f.amountUnit.value.trim()) return fail('「1つあたりの量」の単位を入れてください(L、ml、回分 など)。', f.amountUnit);
     if (!hasPer && f.amountUnit.value.trim()) return fail('「1つあたりの量」の数を入れてください。使わないときは、量の単位も空にしてください。', f.amountPer);
+    if (f.mark.value === 'avoid' && !f.avoidReason.value.trim()) return fail('理由を入れてください。', f.avoidReason);
     const old = state.items.find((it) => it.id === editingId);
     const item = sanitizeItem({
       ...(old || {}),
       name: f.name.value, genre: f.genre.value, location: f.location.value,
       quantity: f.quantity.value === '' ? 0 : f.quantity.value, unit: f.unit.value, minQuantity: f.minQuantity.value,
       group: f.group.value, amountPer: f.amountPer.value, amountUnit: f.amountUnit.value,
+      mark: f.mark.value, avoidReason: f.avoidReason.value,
       bestBefore: f.bestBefore.value, useBy: f.useBy.value, reviewAt: f.reviewAt.value, leadDays: f.leadDays.value,
       maker: f.maker.value, model: f.model.value, size: f.size.value, memo: f.memo.value,
       updatedAt: new Date().toISOString(),
@@ -577,6 +644,7 @@
     saveDraft();
   });
   // 入力するたびに下書きを保存。保存・やめる・削除で画面を閉じたら捨てる
+  form.elements.mark.addEventListener('change', syncMark);
   form.addEventListener('input', saveDraft);
   form.addEventListener('change', saveDraft);
   // close の知らせは少し遅れて届くので、ボタンで閉じるときはその場でも捨てる(closeForm)
@@ -636,6 +704,7 @@
       const msg = `バックアップの ${next.items.length}件 を読み込みます。\n今この端末にある ${state.items.length}件 は置き換えられます。よろしいですか？`;
       if (!confirm(msg)) return;
       state = next;
+      groupFilter = null;
       save();
       renderAll();
       toast(`${next.items.length}件を読み込みました`);
@@ -818,6 +887,9 @@
     $('#fab').addEventListener('click', () => openForm(null));
     $('#q').addEventListener('input', renderList);
     $('#f-genre').addEventListener('change', renderList);
+    $('#f-location').addEventListener('change', renderList);
+    $('#f-mark').addEventListener('change', renderList);
+    $('#group-chip-clear').addEventListener('click', () => { groupFilter = null; renderList(); });
     $('#f-sort').addEventListener('change', renderList);
     $('#s-lead').addEventListener('change', (ev) => {
       const n = num(ev.target.value);
@@ -833,6 +905,7 @@
       localStorage.removeItem(KEY);
       clearDraft();
       state = normalize(null);
+      groupFilter = null;
       renderAll();
       toast('すべて消しました');
     });

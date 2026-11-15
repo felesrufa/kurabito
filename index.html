@@ -33,14 +33,15 @@
     <!-- 一覧 -->
     <section id="view-list" class="view" hidden aria-labelledby="tab-list">
       <h2 class="view-title">一覧</h2>
-      <details id="totals" class="totals" open hidden>
-        <summary>まとめ名ごとの合計</summary>
-        <ul id="totals-list"></ul>
-      </details>
       <div class="tools">
-        <input type="search" id="q" placeholder="品名・置き場所・メモで探す" autocomplete="off">
+        <input type="search" id="q" placeholder="品名・置き場所・メモ・理由で探す" autocomplete="off">
         <div class="row">
-          <select id="f-genre" aria-label="ジャンル">
+          <select id="f-genre" aria-label="ジャンル"></select>
+          <select id="f-location" aria-label="置き場所"></select>
+          <select id="f-mark" aria-label="買い物の印">
+            <option value="">すべての印</option>
+            <option value="buy">買いたい</option>
+            <option value="avoid">もう買わない</option>
           </select>
           <select id="f-sort" aria-label="並び順">
             <option value="due">期限が近い順</option>
@@ -50,7 +51,14 @@
           </select>
         </div>
       </div>
+      <details id="totals" class="totals" open hidden>
+        <summary id="totals-title">まとめ名ごとの合計</summary>
+        <ul id="totals-list"></ul>
+      </details>
       <p class="hint" id="list-summary"></p>
+      <div id="group-chip" class="chips" hidden>
+        <button type="button" id="group-chip-clear" class="chip" aria-label="まとめ名の絞り込みを解除"></button>
+      </div>
       <ul id="item-list" class="items"></ul>
     </section>
 
@@ -140,6 +148,15 @@
         <button type="button" data-step="-1" class="btn small">−1</button>
         <button type="button" data-step="1" class="btn small">＋1</button>
       </div>
+
+      <label class="field"><span>買い物の印</span>
+        <select name="mark">
+          <option value="">なし</option>
+          <option value="buy">買いたい</option>
+          <option value="avoid">もう買わない</option>
+        </select></label>
+      <label class="field" id="avoid-field" hidden><span>もう買わない理由 <em>必須</em></span>
+        <textarea name="avoidReason" rows="3"></textarea></label>
 
       <div class="grid3">
         <label class="field"><span>まとめ名</span>
