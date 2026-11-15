@@ -5,7 +5,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.5.0';
+  const VERSION = '0.5.1';
   const KEY = 'kurabito:v1';
   const DRAFT_KEY = 'kurabito:draft';
   const COPY_DRAFT_KEY = 'kurabito:draft-copy';   // 「この品をコピー」の下書き。コピー元の下書きとは別に持つ
@@ -742,6 +742,123 @@
     }));
   }
 
+  /* よみがなの自動入力(試作)。
+   * 品名を日本語入力で打つとき、変換前のかなを拾って、よみがな欄に入れる(申込みフォームの「ふりがな自動入力」と同じ考え方)。
+   * 外れても害が小さいように、読みがわからない部分が少しでもあれば、その回は何も入れない。 */
+  // 読みがそのままわかる字(ひらがな・カタカナ・長音・英数字・一部の記号)以外 = 漢字など、読みのわからない字
+  const UNREADABLE = /[^ぁ-ゖ゛-ゞァ-ー -~　-。「-』]/;
+  const unreadable = (text) => UNREADABLE.test(text.normalize('NFKC'));
+  const autoYomi = {
+    name: '',        // いま追いかけている品名
+    segs: [],        // 品名を、打った順のかたまりに分けたもの [{ text, yomi }]
+    ok: true,        // false = 読みのわからない部分がある(この回はあきらめた)
+    ime: false,      // 日本語入力を使ったか(使っていない入力では、何も入れない)
+    filled: null,    // 自動で入れた値。よみがな欄がこの値のままなら、まだ手で触っていない
+    composing: false,
+    kana: null,      // 変換前のかな(日本語入力の途中で、最後に見えた「読める」文字列)
+    pending: null,   // 確定したばかりのかたまり { data, yomi }
+  };
+
+  /** フォームを開いたとき・品名をプログラムから入れたとき。いまの品名から追いかけ直す */
+  function resetAutoYomi() {
+    const name = form.elements.name.value;
+    Object.assign(autoYomi, {
+      name,
+      // 漢字のない品名は、そのまま読める。漢字があれば読みがわからないので、品名を消して打ち直すまで何もしない
+      segs: unreadable(name) ? [] : [{ text: name, yomi: toHira(name) }],
+      ok: !unreadable(name),
+      ime: false, composing: false, kana: null, pending: null,
+    });
+  }
+
+  /** 品名が変わったら、どこがどう変わったかを見て、読みをつなげ直す */
+  function syncAutoYomi(inputType) {
+    const a = autoYomi;
+    const now = form.elements.name.value;
+    if (now === a.name) return;
+    const pending = a.pending;
+    if (now === '') {
+      Object.assign(a, { segs: [], ok: true, ime: false });   // 全部消したら、最初からやり直せる
+    } else if (a.ok && now.startsWith(a.name)) {   // 後ろに足した
+      const add = now.slice(a.name.length);
+      let yomi = null;
+      if (pending && add === pending.data) {
+        yomi = pending.yomi;   // 日本語入力で確定した分(読みが拾えなかったら null)
+        a.ime = true;
+      } else if (inputType !== 'insertFromPaste' && inputType !== 'insertFromDrop' && !unreadable(add)) {
+        yomi = toHira(add);    // 英数字・カタカナなどを、そのまま打った分
+      }
+      if (yomi === null) a.ok = false; else a.segs.push({ text: add, yomi });
+    } else {
+      // 消した・途中を書き換えた など。打った順のかたまりを先頭から当て直し、合うところまでの読みを残す
+      const kept = [];
+      let head = '';
+      for (const seg of a.segs) {
+        if (!now.startsWith(head + seg.text)) break;
+        kept.push(seg);
+        head += seg.text;
+      }
+      const rest = now.slice(head.length);
+      const next = a.segs[kept.length];
+      if (rest === '') {
+        a.ok = true;    // かたまりの境目まで戻った
+      } else if (next && !unreadable(next.text) && next.text.startsWith(rest)) {
+        kept.push({ text: rest, yomi: toHira(rest) });   // かなのかたまりは、途中まででも読める
+        a.ok = true;
+      } else {
+        a.ok = false;   // 漢字のかたまりの途中、または読みのわからない字が残っている
+      }
+      a.segs = kept;
+    }
+    a.pending = null;
+    a.name = now;
+    if (!a.ok && !unreadable(now)) Object.assign(a, { segs: [{ text: now, yomi: toHira(now) }], ok: true });   // 漢字がなくなれば、また読める
+    applyAutoYomi();
+  }
+
+  /** よみがな欄に入れる。欄が空か、前に自動で入れた値のままのときだけ(手で直したものは決して上書きしない) */
+  function applyAutoYomi() {
+    const a = autoYomi;
+    const field = form.elements.yomi;
+    const untouched = field.value === '' || (a.filled !== null && field.value === a.filled);
+    if (!untouched) {
+      a.filled = null;
+      $('#yomi-auto').hidden = true;
+      return;
+    }
+    const yomi = a.ok && a.ime ? a.segs.map((s) => s.yomi).join('').trim().slice(0, YOMI_MAX) : '';
+    field.value = yomi;   // 読みがわからなくなったら、半端な読みを残さず空に戻す
+    a.filled = yomi || null;
+    $('#yomi-auto').hidden = !yomi;
+    saveDraft();
+  }
+
+  const nameInput = form.elements.name;
+  nameInput.addEventListener('compositionstart', () => { Object.assign(autoYomi, { composing: true, kana: null, pending: null }); });
+  nameInput.addEventListener('compositionupdate', (ev) => {
+    // 変換する前は、かなだけが見えている。変換後(漢字まじり)の文字列では上書きしない
+    if (ev.data && !unreadable(ev.data)) autoYomi.kana = ev.data;
+  });
+  nameInput.addEventListener('compositionend', (ev) => {
+    const a = autoYomi;
+    a.composing = false;
+    const data = ev.data || '';
+    if (data) {
+      // 確定した文字が読めるなら、それが読み。漢字まじりなら、変換前に拾ったかなが読み(拾えていなければ null)
+      a.pending = { data, yomi: unreadable(data) ? (a.kana ? toHira(a.kana) : null) : toHira(data) };
+    }
+    a.kana = null;
+    syncAutoYomi();   // ブラウザによっては、このあとの input で品名が変わる。そのときは input の側で拾う
+  });
+  nameInput.addEventListener('input', (ev) => {
+    if (ev.isComposing || autoYomi.composing) return;   // 変換の途中は見ない
+    syncAutoYomi(ev.inputType);
+  });
+  form.elements.yomi.addEventListener('input', () => {
+    // 手で触ったら、もう自動では書き換えない
+    if (form.elements.yomi.value !== autoYomi.filled) { autoYomi.filled = null; $('#yomi-auto').hidden = true; }
+  });
+
   /* 品名の候補(新規登録とコピーのフォームだけ) */
   function hideSuggest() {
     const box = $('#name-suggest');
@@ -771,7 +888,7 @@
     box.replaceChildren(...hits.slice(0, 5).map(({ it }) => el('div', { class: 'sg' }, [
       el('button', {
         type: 'button', class: 'sg-name', 'aria-label': `品名に「${it.name}」を入れる`,
-        on: { click: () => { f.name.value = it.name; hideSuggest(); checkAvoid(); saveDraft(); } },
+        on: { click: () => { f.name.value = it.name; resetAutoYomi(); applyAutoYomi(); hideSuggest(); checkAvoid(); saveDraft(); } },
       }, [
         el('span', { text: it.name }),
         it.mark && el('span', { class: `pill ${it.mark}`, text: MARKS[it.mark] }),
@@ -824,6 +941,10 @@
     for (const it of state.items) if (it.group && !groups.has(normKey(it.group))) groups.set(normKey(it.group), it.group);
     $('#dl-group').replaceChildren(...[...groups.values()].sort((a, b) => a.localeCompare(b, 'ja')).map((g) => el('option', { value: g })));
     hideSuggest();
+    // よみがなの自動入力は、開いたときの品名から追いかけ直す。入っているよみがなには触らない
+    resetAutoYomi();
+    autoYomi.filled = null;
+    $('#yomi-auto').hidden = true;
     // 注意は、コピー・「買った」・下書きの続きで開いたときだけ、開いた時点でも確かめる
     if (copy || bought || draft) checkAvoid(); else $('#avoid-warn').hidden = true;
     if (!dlg.open) dlg.showModal();
