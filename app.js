@@ -5,9 +5,11 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.4.0';
+  const VERSION = '0.4.1';
   const KEY = 'kurabito:v1';
   const DRAFT_KEY = 'kurabito:draft';
+  const COPY_DRAFT_KEY = 'kurabito:draft-copy';   // 「この品をコピー」の下書き。コピー元の下書きとは別に持つ
+  const YOMI_MAX = 100;
   const SCHEMA = 1;
   // 最初の4つのジャンル。識別子は変えない・消せない(名前は変えられる)。「その他」は行き先の受け皿
   const BUILTIN_GENRES = [['food', '食品'], ['bousai', '防災グッズ'], ['daily', '日用品'], ['other', 'その他']];
@@ -69,6 +71,11 @@
 
   /** 比べるときの形。全角/半角の英数字・かっこ・前後の空白の違いをなくす(読みは見ない) */
   const normKey = (s) => s.normalize('NFKC').trim();
+  /** NFKC にそろえ、カタカナをひらがなに直す(長音「ー」はそのまま) */
+  const toHira = (s) => s.normalize('NFKC').replace(/[\u30A1-\u30F6]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0x60));
+  /** 並び順の鍵。よみがながあればよみがな、なければ品名。かなはひらがなにそろえて比べる */
+  const sortKey = (it) => toHira(it.yomi || it.name);
+  const byName = (a, b) => sortKey(a).localeCompare(sortKey(b), 'ja') || a.name.localeCompare(b.name, 'ja');
 
   /** ジャンルの一覧を整える。一覧がない古いデータは最初の4つだけにする */
   function sanitizeGenres(raw) {
@@ -107,6 +114,7 @@
     return {
       id: /^i_[a-z0-9]{4,14}$/.test(raw.id) ? raw.id : newId('i'),
       name,
+      yomi: typeof raw.yomi === 'string' ? toHira(raw.yomi).trim().slice(0, YOMI_MAX) : '',   // ひらがなにそろえて持つ
       genre: genreIds.has(raw.genre) ? raw.genre : 'other',
       quantity: num(raw.quantity) ?? 0,
       unit: str(raw.unit, 10),
@@ -443,6 +451,7 @@
   function renderList() {
     renderLocationOptions();
     const q = $('#q').value.trim().toLowerCase();
+    const qHira = toHira(q).trim();   // よみがなと比べるときは、検索語のカタカナもひらがなに直す
     const genre = $('#f-genre').value;
     const loc = $('#f-location').value;
     const mark = $('#f-mark').value;
@@ -454,6 +463,7 @@
       if (mark && it.mark !== mark) return false;
       if (groupFilter && totalKey(it) !== groupFilter.key) return false;
       if (!q) return true;
+      if (qHira && it.yomi.includes(qHira)) return true;
       return [it.name, it.group, it.location, it.memo, it.maker, it.model, it.size, it.avoidReason].some((v) => v.toLowerCase().includes(q));
     });
     // 合計は、絞り込んだ品だけで出す
@@ -461,7 +471,6 @@
     const chip = $('#group-chip');
     chip.hidden = !groupFilter;
     if (groupFilter) $('#group-chip-clear').textContent = `まとめ名:${groupFilter.label}${groupFilter.unit ? `(${groupFilter.unit})` : ''} ✕`;
-    const byName = (a, b) => a.name.localeCompare(b.name, 'ja');
     const sorters = {
       due: (a, b) => (nearestDue(a) || '9999').localeCompare(nearestDue(b) || '9999') || byName(a, b),
       name: byName,
@@ -482,38 +491,68 @@
       ]));
       return;
     }
+    // 同じ品名(normKey)・同じ印の品は、一行に束ねて見せる。束ねるのは描画だけで、絞り込み・並び・合計は rows のまま
+    const bundles = new Map();
     for (const it of rows) {
-      const short = isShort(it);
-      const meta = el('div', { class: 'meta' }, [
-        it.mark && el('span', { class: `pill ${it.mark}`, text: MARKS[it.mark] }),
-        duePill(it),
-        el('span', { class: 'pill genre', text: genreName(it.genre) }),
-        it.location && el('span', { class: 'where', text: it.location }),
-        it.group && el('span', { class: 'where', text: `まとめ: ${it.group}` }),
-        it.amountPer !== null && el('span', { class: 'where', text: `1${it.unit || 'つ'}あたり ${fmtNum(it.amountPer)}${it.amountUnit}` }),
-        it.size && el('span', { class: 'where', text: `サイズ ${it.size}` }),
-      ]);
-      const main = el('button', { type: 'button', class: 'main', 'aria-label': `${it.name} を編集`, on: { click: () => openForm(it) } }, [
-        el('div', { class: 'name', text: it.name }),
-        it.mark === 'avoid' && it.avoidReason && el('div', { class: 'reason', text: `理由: ${it.avoidReason}` }),
-        meta,
-      ]);
-      const step = (n) => () => {
-        it.quantity = Math.max(0, Math.round((it.quantity + n) * 1000) / 1000);
-        it.updatedAt = new Date().toISOString();
-        save();
-        renderAll();
-      };
-      const qty = el('div', { class: 'qty' }, [
-        el('button', { type: 'button', class: 'step', text: '−', 'aria-label': `${it.name} を1つ減らす`, on: { click: step(-1) } }),
-        el('b', { class: short ? 'short' : '', text: qtyText(it) }),
-        el('button', { type: 'button', class: 'step', text: '＋', 'aria-label': `${it.name} を1つ増やす`, on: { click: step(1) } }),
-      ]);
-      const bought = it.mark === 'buy' && el('div', { class: 'row-actions' }, [
-        el('button', { type: 'button', class: 'btn small primary', text: '買った', 'aria-label': `${it.name} を買った`, on: { click: () => openForm(it, null, true) } }),
-      ]);
-      ul.append(el('li', { class: 'item' }, [main, qty, bought]));
+      const key = `${normKey(it.name)}\n${it.mark}`;
+      if (!bundles.has(key)) bundles.set(key, []);
+      bundles.get(key).push(it);
     }
+    for (const members of bundles.values()) {   // Map は入れた順 = 束の先頭の品の並び順
+      if (members.length === 1) {
+        ul.append(el('li', { class: 'item' }, itemParts(members[0], false)));
+        continue;
+      }
+      const byDue = members.slice().sort((a, b) => (nearestDue(a) || '9999').localeCompare(nearestDue(b) || '9999'));
+      const first = byDue[0];
+      const sameUnit = new Set(byDue.map((m) => normKey(m.unit))).size === 1;   // 単位が違うなら合計は出さない
+      const sum = byDue.reduce((n, m) => n + m.quantity, 0);
+      ul.append(el('li', { class: 'item bundle' }, [
+        el('div', { class: 'bundle-head' }, [
+          el('div', { class: 'name', text: first.name }),
+          first.mark && el('span', { class: `pill ${first.mark}`, text: MARKS[first.mark] }),
+          el('span', { class: 'count', text: `${byDue.length}件` }),
+          sameUnit && el('b', { class: 'sum', text: `合計 ${fmtNum(sum)}${first.unit}` }),
+        ]),
+        ...byDue.map((m) => el('div', { class: 'sub' }, itemParts(m, true))),
+        el('button', { type: 'button', class: 'btn small add-due', text: '＋別の期限を足す', 'aria-label': `${first.name} に別の期限を足す`, on: { click: () => openCopy(first) } }),
+      ]));
+    }
+  }
+
+  /** 一覧の1品分(編集ボタン・数量の＋/−・「買った」)。inBundle = 束の中の行(品名と印は束の見出しに出す) */
+  function itemParts(it, inBundle) {
+    const meta = el('div', { class: 'meta' }, [
+      !inBundle && it.mark && el('span', { class: `pill ${it.mark}`, text: MARKS[it.mark] }),
+      duePill(it) || (inBundle && el('span', { class: 'pill genre', text: '期限なし' })),
+      el('span', { class: 'pill genre', text: genreName(it.genre) }),
+      it.location && el('span', { class: 'where', text: it.location }),
+      it.group && el('span', { class: 'where', text: `まとめ: ${it.group}` }),
+      it.amountPer !== null && el('span', { class: 'where', text: `1${it.unit || 'つ'}あたり ${fmtNum(it.amountPer)}${it.amountUnit}` }),
+      it.size && el('span', { class: 'where', text: `サイズ ${it.size}` }),
+    ]);
+    const due = nearestDue(it);
+    const label = inBundle ? `${it.name}(${due ? `期限 ${fmtDate(due)}` : '期限なし'})` : it.name;
+    const main = el('button', { type: 'button', class: 'main', 'aria-label': `${label} を編集`, on: { click: () => openForm(it) } }, [
+      !inBundle && el('div', { class: 'name', text: it.name }),
+      it.mark === 'avoid' && it.avoidReason && el('div', { class: 'reason', text: `理由: ${it.avoidReason}` }),
+      meta,
+    ]);
+    const step = (n) => () => {
+      it.quantity = Math.max(0, Math.round((it.quantity + n) * 1000) / 1000);
+      it.updatedAt = new Date().toISOString();
+      save();
+      renderAll();
+    };
+    const qty = el('div', { class: 'qty' }, [
+      el('button', { type: 'button', class: 'step', text: '−', 'aria-label': `${label} を1つ減らす`, on: { click: step(-1) } }),
+      el('b', { class: isShort(it) ? 'short' : '', text: qtyText(it) }),
+      el('button', { type: 'button', class: 'step', text: '＋', 'aria-label': `${label} を1つ増やす`, on: { click: step(1) } }),
+    ]);
+    const bought = it.mark === 'buy' && el('div', { class: 'row-actions' }, [
+      el('button', { type: 'button', class: 'btn small primary', text: '買った', 'aria-label': `${label} を買った`, on: { click: () => openForm(it, { bought: true }) } }),
+    ]);
+    return [main, qty, bought];
   }
 
   /* ---------- 登録・編集 ---------- */
@@ -521,23 +560,31 @@
   const form = $('#item-form');
   let editingId = null;
 
-  const FIELDS = ['name', 'genre', 'location', 'quantity', 'unit', 'minQuantity', 'group', 'amountPer', 'amountUnit', 'mark', 'avoidReason', 'bestBefore', 'useBy', 'reviewAt', 'leadDays', 'maker', 'model', 'size', 'memo'];
+  const FIELDS = ['name', 'yomi', 'genre', 'location', 'quantity', 'unit', 'minQuantity', 'group', 'amountPer', 'amountUnit', 'mark', 'avoidReason', 'bestBefore', 'useBy', 'reviewAt', 'leadDays', 'maker', 'model', 'size', 'memo'];
+  // コピーで空にする欄(数量・期限・見直し日・買い物の印・理由)。ほかは引き継ぐ
+  const COPY_BLANK = new Set(['quantity', 'bestBefore', 'useBy', 'reviewAt', 'mark', 'avoidReason']);
+  let copyMode = false;   // コピーで開いた新規登録フォームか
+  let copyTags = [];      // コピー元から引き継ぐタグ(入力欄がないので別に持つ)
 
-  /* 入力途中の下書き。別のアプリに移っている間にアプリが閉じられても、続きから書けるようにする */
+  /* 入力途中の下書き。別のアプリに移っている間にアプリが閉じられても、続きから書けるようにする。
+   * コピーのフォームは別の置き場所(COPY_DRAFT_KEY)に書くので、コピー元の下書きと混ざらない */
+  const draftKey = () => (copyMode ? COPY_DRAFT_KEY : DRAFT_KEY);
   function saveDraft() {
     if (!dlg.open) return;
     const values = {};
     for (const name of FIELDS) values[name] = form.elements[name].value;
+    const draft = { editingId: copyMode ? null : editingId, values, savedAt: new Date().toISOString() };
+    if (copyMode) draft.tags = copyTags;
     try {
-      localStorage.setItem(DRAFT_KEY, JSON.stringify({ editingId, values, savedAt: new Date().toISOString() }));
+      localStorage.setItem(draftKey(), JSON.stringify(draft));
     } catch { /* 下書きは保存できなくても先へ進む */ }
   }
-  function clearDraft() {
-    try { localStorage.removeItem(DRAFT_KEY); } catch { /* noop */ }
+  function clearDraft(key = draftKey()) {
+    try { localStorage.removeItem(key); } catch { /* noop */ }
   }
-  function loadDraft() {
+  function loadDraft(key) {
     try {
-      const d = JSON.parse(localStorage.getItem(DRAFT_KEY));
+      const d = JSON.parse(localStorage.getItem(key));
       if (!d || typeof d !== 'object' || !d.values || typeof d.values !== 'object') return null;
       const values = {};
       for (const name of FIELDS) values[name] = typeof d.values[name] === 'string' ? d.values[name].slice(0, name === 'avoidReason' ? REASON_MAX : 500) : '';
@@ -547,22 +594,33 @@
       return {
         item: state.items.find((it) => it.id === d.editingId) || null,
         values,
+        tags: Array.isArray(d.tags) ? d.tags : [],
         savedAt: typeof d.savedAt === 'string' ? new Date(d.savedAt) : null,
       };
     } catch {
       return null;
     }
   }
+  /** 書きかけがあれば、続けるか聞く。コピーの下書き → ふつうの下書き の順に1つずつ */
   function offerDraft() {
-    const d = loadDraft();
-    if (!d) return clearDraft();
-    const when = d.savedAt && !Number.isNaN(d.savedAt.getTime())
-      ? ` ・ ${d.savedAt.getMonth() + 1}月${d.savedAt.getDate()}日 ${d.savedAt.getHours()}:${pad(d.savedAt.getMinutes())}`
-      : '';
-    $('#draft-what').textContent = `「${d.values.name || '(品名なし)'}」を${d.item ? '編集' : '追加'}している途中でした${when}`;
-    $('#b-draft-resume').onclick = () => { $('#draft-dlg').close(); openForm(d.item, d.values); };
-    $('#b-draft-discard').onclick = () => { $('#draft-dlg').close(); clearDraft(); };
-    $('#draft-dlg').showModal();
+    if (dlg.open || $('#draft-dlg').open) return;
+    for (const key of [COPY_DRAFT_KEY, DRAFT_KEY]) {
+      const d = loadDraft(key);
+      if (!d) { clearDraft(key); continue; }
+      const isCopy = key === COPY_DRAFT_KEY;
+      const when = d.savedAt && !Number.isNaN(d.savedAt.getTime())
+        ? ` ・ ${d.savedAt.getMonth() + 1}月${d.savedAt.getDate()}日 ${d.savedAt.getHours()}:${pad(d.savedAt.getMinutes())}`
+        : '';
+      const doing = isCopy ? 'コピーして追加' : d.item ? '編集' : '追加';
+      $('#draft-what').textContent = `「${d.values.name || '(品名なし)'}」を${doing}している途中でした${when}`;
+      $('#b-draft-resume').onclick = () => {
+        $('#draft-dlg').close();
+        if (isCopy) openForm(null, { draft: d.values, copy: true, tags: d.tags }); else openForm(d.item, { draft: d.values });
+      };
+      $('#b-draft-discard').onclick = () => { $('#draft-dlg').close(); clearDraft(key); offerDraft(); };
+      $('#draft-dlg').showModal();
+      return;
+    }
   }
 
   function closeForm() {
@@ -570,15 +628,99 @@
     dlg.close();
   }
 
+  /* 「もう買わない」の品に似た登録への注意(保存は止めない) */
+  // 容量・本数のような表記(500ml / 2L / 24本 / 6個 / ×12 など)
+  const QTY_WORDS = /[×*]?\s*\d+(?:\.\d+)?\s*(?:ml|mm|cm|kg|cc|l|g|m|本|個|枚|袋|箱|缶|食|回分|回|巻|ロール|セット|パック|組|粒|錠|包|入り|入)(?![a-z])/g;
+  const QTY_TIMES = /[×*]\s*\d+(?:\.\d+)?/g;
+  const QTY_X = /(^|[^a-z])x\s*\d+(?:\.\d+)?/g;   // 「x12」。英単語の途中の x は残す(古い Safari でも動くよう、後読みは使わない)
+  /** 品名から、容量・本数の表記と、空白・記号を取り除いた名前 */
+  const coreName = (name) => name.normalize('NFKC').toLowerCase()
+    .replace(QTY_WORDS, '').replace(QTY_TIMES, '').replace(QTY_X, '$1')
+    .replace(/[\s\p{P}\p{S}]/gu, '');
+  const lowKey = (s) => normKey(s).toLowerCase();
+
+  function findAvoidLike() {
+    const f = form.elements;
+    const core = coreName(f.name.value);
+    const maker = lowKey(f.maker.value);
+    const model = lowKey(f.model.value);
+    return state.items.filter((it) => it.mark === 'avoid' && it.id !== editingId && (
+      (core.length >= 2 && coreName(it.name) === core)
+      || (maker && model && lowKey(it.maker) === maker && lowKey(it.model) === model)
+    ));
+  }
+  function checkAvoid() {
+    const hits = findAvoidLike();
+    const box = $('#avoid-warn');
+    box.hidden = hits.length === 0;
+    box.replaceChildren(...hits.slice(0, 3).map((it) => {
+      const reason = it.avoidReason.length > 200 ? `${it.avoidReason.slice(0, 200)}…` : it.avoidReason;
+      return el('p', { text: `「${it.name}」を『もう買わない』で登録しています。理由:${reason || '(理由なし)'}` });
+    }));
+  }
+
+  /* 品名の候補(新規登録とコピーのフォームだけ) */
+  function hideSuggest() {
+    const box = $('#name-suggest');
+    box.hidden = true;
+    box.replaceChildren();
+  }
+  function updateSuggest() {
+    const f = form.elements;
+    const q = lowKey(f.name.value);
+    if (editingId !== null || q.length < 2) return hideSuggest();
+    const qHira = toHira(q);
+    const seen = new Set();
+    const hits = [];
+    for (const it of state.items) {
+      const n = lowKey(it.name);
+      // 品名どうしは、かなの読み替えをしない部分一致。よみがなは、ひらがなにそろえて部分一致
+      if (!n.includes(q) && !(it.yomi && it.yomi.includes(qHira))) continue;
+      const key = `${n}\n${it.mark}`;   // 同じ品名・同じ印(期限ちがい)は1件にまとめる
+      if (seen.has(key)) continue;
+      seen.add(key);
+      hits.push({ it, rank: (it.mark === 'avoid' ? 0 : 2) + (n.startsWith(q) ? 0 : 1) });   // 「もう買わない」を先に(見落とさないため)
+    }
+    if (hits.length === 0) return hideSuggest();
+    hits.sort((a, b) => a.rank - b.rank || byName(a.it, b.it));
+    const box = $('#name-suggest');
+    box.hidden = false;
+    box.replaceChildren(...hits.slice(0, 5).map(({ it }) => el('div', { class: 'sg' }, [
+      el('button', {
+        type: 'button', class: 'sg-name', 'aria-label': `品名に「${it.name}」を入れる`,
+        on: { click: () => { f.name.value = it.name; hideSuggest(); checkAvoid(); saveDraft(); } },
+      }, [
+        el('span', { text: it.name }),
+        it.mark && el('span', { class: `pill ${it.mark}`, text: MARKS[it.mark] }),
+      ]),
+      el('button', { type: 'button', class: 'btn small', text: 'コピー', 'aria-label': `「${it.name}」をコピーして開く`, on: { click: () => openCopy(it) } }),
+    ])));
+  }
+
+  /** 「この品をコピー」。同じ内容の新規登録フォームを開く。保存するまで何も作らない */
+  function openCopy(src) {
+    // 新規登録やコピーのフォームからの乗り換えは、同じフォームの書き直しなので、その下書きは捨てる。
+    // 編集フォームからのときは、コピー元の下書きに触らない(コピーを閉じたあとで、続けるか聞く)
+    if (dlg.open && (copyMode || editingId === null)) clearDraft();
+    const values = {};
+    for (const name of FIELDS) values[name] = COPY_BLANK.has(name) ? '' : String(src[name] ?? '');
+    openForm(null, { draft: values, copy: true, tags: src.tags.slice() });
+  }
+
   /** 理由の欄は「もう買わない」のときだけ出す */
   function syncMark() {
     $('#avoid-field').hidden = form.elements.mark.value !== 'avoid';
   }
 
-  /** bought = true は一覧の「買った」から。印を外した状態で出すだけで、保存するまで何も変えない */
-  function openForm(item, draft, bought) {
+  /** opts.bought = 一覧の「買った」から(印を外した状態で出すだけで、保存するまで何も変えない)。
+   *  opts.copy = コピーの新規登録フォーム(opts.draft に中身、opts.tags に引き継ぐタグ) */
+  function openForm(item, opts = {}) {
+    const { draft = null, bought = false, copy = false, tags = [] } = opts;
     editingId = item ? item.id : null;
-    $('#dlg-title').textContent = bought ? '買った品を確かめて保存' : item ? '品を編集' : '品を追加';
+    copyMode = copy;
+    copyTags = copy ? tags : [];
+    $('#dlg-title').textContent = copy ? '品をコピーして追加' : bought ? '買った品を確かめて保存' : item ? '品を編集' : '品を追加';
+    $('#b-copy').hidden = !item;
     $('#b-delete').hidden = !item;
     $('#form-error').hidden = true;
     form.reset();
@@ -597,7 +739,11 @@
     const groups = new Map();
     for (const it of state.items) if (it.group && !groups.has(normKey(it.group))) groups.set(normKey(it.group), it.group);
     $('#dl-group').replaceChildren(...[...groups.values()].sort((a, b) => a.localeCompare(b, 'ja')).map((g) => el('option', { value: g })));
-    dlg.showModal();
+    hideSuggest();
+    // 注意は、コピー・「買った」・下書きの続きで開いたときだけ、開いた時点でも確かめる
+    if (copy || bought || draft) checkAvoid(); else $('#avoid-warn').hidden = true;
+    if (!dlg.open) dlg.showModal();
+    dlg.scrollTop = 0;
     if (!item && !draft) f.name.focus();
   }
 
@@ -617,7 +763,8 @@
     const old = state.items.find((it) => it.id === editingId);
     const item = sanitizeItem({
       ...(old || {}),
-      name: f.name.value, genre: f.genre.value, location: f.location.value,
+      ...(copyMode ? { tags: copyTags } : {}),
+      name: f.name.value, yomi: f.yomi.value, genre: f.genre.value, location: f.location.value,
       quantity: f.quantity.value === '' ? 0 : f.quantity.value, unit: f.unit.value, minQuantity: f.minQuantity.value,
       group: f.group.value, amountPer: f.amountPer.value, amountUnit: f.amountUnit.value,
       mark: f.mark.value, avoidReason: f.avoidReason.value,
@@ -644,11 +791,27 @@
     saveDraft();
   });
   // 入力するたびに下書きを保存。保存・やめる・削除で画面を閉じたら捨てる
-  form.elements.mark.addEventListener('change', syncMark);
+  form.elements.mark.addEventListener('change', () => {
+    syncMark();
+    if (form.elements.mark.value === 'buy') checkAvoid();
+  });
+  // 注意と候補は、日本語入力の確定のとき(入力のたびには出さない)。かな入力を使わない入力は、欄を離れたときに確かめる
+  form.elements.name.addEventListener('compositionend', () => { checkAvoid(); updateSuggest(); });
+  form.elements.name.addEventListener('input', (ev) => { if (!ev.isComposing) updateSuggest(); });
+  for (const name of ['name', 'maker', 'model']) form.elements[name].addEventListener('change', checkAvoid);
+  $('#b-copy').addEventListener('click', () => {
+    const it = state.items.find((x) => x.id === editingId);
+    if (it) openCopy(it);
+  });
   form.addEventListener('input', saveDraft);
   form.addEventListener('change', saveDraft);
   // close の知らせは少し遅れて届くので、ボタンで閉じるときはその場でも捨てる(closeForm)
-  dlg.addEventListener('close', clearDraft);
+  dlg.addEventListener('close', () => {
+    if (dlg.open) return;   // もう次のフォームが開いている
+    clearDraft();
+    // コピーを閉じたあと、コピー元の書きかけが残っていれば、続けるか聞く
+    if (copyMode) { copyMode = false; offerDraft(); }
+  });
   $('#b-cancel').addEventListener('click', () => closeForm());
   $('#b-delete').addEventListener('click', () => {
     const it = state.items.find((x) => x.id === editingId);
@@ -903,7 +1066,8 @@
       if (!confirm('この端末のkurabitoのデータをすべて消します。元に戻せません。')) return;
       if (!confirm('本当に消しますか？ バックアップは書き出しましたか？')) return;
       localStorage.removeItem(KEY);
-      clearDraft();
+      clearDraft(DRAFT_KEY);
+      clearDraft(COPY_DRAFT_KEY);
       state = normalize(null);
       groupFilter = null;
       renderAll();

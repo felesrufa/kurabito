@@ -34,7 +34,7 @@
     <section id="view-list" class="view" hidden aria-labelledby="tab-list">
       <h2 class="view-title">一覧</h2>
       <div class="tools">
-        <input type="search" id="q" placeholder="品名・置き場所・メモ・理由で探す" autocomplete="off">
+        <input type="search" id="q" placeholder="品名・よみがな・置き場所・メモで探す" autocomplete="off">
         <div class="row">
           <select id="f-genre" aria-label="ジャンル"></select>
           <select id="f-location" aria-label="置き場所"></select>
@@ -128,6 +128,10 @@
 
       <label class="field"><span>品名 <em>必須</em></span>
         <input name="name" required maxlength="80" autocomplete="off"></label>
+      <div id="name-suggest" class="suggest" aria-label="登録済みの品名の候補" hidden></div>
+      <div id="avoid-warn" class="warn-box" role="status" hidden></div>
+      <label class="field"><span>よみがな <small>(並び順用・空でもよい)</small></span>
+        <input name="yomi" maxlength="100" autocomplete="off"></label>
 
       <div class="grid2">
         <label class="field"><span>ジャンル</span>
@@ -198,6 +202,9 @@
 
       <p class="error" id="form-error" role="alert" hidden></p>
 
+      <div class="copy-row">
+        <button type="button" id="b-copy" class="btn" hidden>この品をコピー</button>
+      </div>
       <div class="dlg-btns">
         <button type="button" id="b-delete" class="btn warn" hidden>削除</button>
         <span class="spacer"></span>

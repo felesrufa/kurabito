@@ -149,6 +149,16 @@ input:focus, select:focus, textarea:focus, .btn:focus-visible, .tabs button:focu
   display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
 }
 .item .row-actions { grid-column: 1 / -1; display: flex; justify-content: flex-end; }
+.item.bundle { display: block; }
+.bundle-head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding-bottom: 6px; }
+.bundle-head .count { color: var(--muted); font-size: .84rem; }
+.bundle-head .sum { margin-left: auto; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.bundle .sub {
+  display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: center;
+  border-top: 1px solid var(--line); padding: 8px 0;
+}
+.bundle .sub .main { min-height: 44px; }
+.bundle .add-due { margin-top: 2px; }
 .pill.genre { background: transparent; border: 1px solid var(--line); color: var(--muted); font-weight: 400; }
 
 .totals {
@@ -203,6 +213,18 @@ input:focus, select:focus, textarea:focus, .btn:focus-visible, .tabs button:focu
 .field { min-width: 0; }
 .field input, .field select, .field textarea { min-width: 0; max-width: 100%; }
 input[type="date"] { padding-left: 8px; padding-right: 6px; font-size: .95rem; }
+.suggest { display: grid; gap: 6px; margin: 0 0 8px; }
+.sg { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; align-items: center; }
+.sg-name {
+  appearance: none; -webkit-appearance: none; min-height: 44px; padding: 6px 12px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--text);
+  font: inherit; font-size: .95rem; text-align: left; word-break: break-word; cursor: pointer;
+}
+.sg-name:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.warn-box { color: var(--warn-text); background: var(--warn-bg); padding: 8px 12px; border-radius: 10px; margin: 0 0 8px; font-size: .92rem; word-break: break-word; }
+.warn-box p { margin: 2px 0; }
+.copy-row { margin-top: 12px; }
 .qty-steps { display: flex; gap: 8px; margin: -2px 0 6px; }
 .more { margin: 8px 0; }
 .more summary { cursor: pointer; color: var(--muted); padding: 8px 0; }
