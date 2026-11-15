@@ -5,7 +5,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.4.1';
+  const VERSION = '0.5.0';
   const KEY = 'kurabito:v1';
   const DRAFT_KEY = 'kurabito:draft';
   const COPY_DRAFT_KEY = 'kurabito:draft-copy';   // 「この品をコピー」の下書き。コピー元の下書きとは別に持つ
@@ -19,6 +19,16 @@
   // 買い物の印。'' = なし。在庫の数え方には関わらない(数量だけで数える)
   const MARKS = { buy: '買いたい', avoid: 'もう買わない' };
   const REASON_MAX = 10000;   // 読み込み時だけ切る。画面では制限しない
+  // 備え(必要リスト)
+  const PLACES = { home: '自宅避難', shelter: '避難所', camp: '野営' };
+  const SEASONS = { summer: '夏', winter: '冬' };
+  const HAZARDS = { quake: '地震', typhoon: '台風', tsunami: '津波', ash: '富士山噴火' };
+  const PRIORITIES = { 1: '命・衛生', 2: 'あると助かる', 3: 'あれば快適' };
+  const FORMULAS = { perPersonPerDay: '1人1日あたり', perPerson: '1人あたり', fixed: '家全体で', perInfant: '乳幼児1人あたり' };
+  const ORIGINS = { public: '公的資料', expert: '専門家', experience: '体験談', mine: '自分メモ' };
+  const SUMMER_MONTHS = [5, 6, 7, 8, 9, 10];   // 暫定: 5〜10月を夏、それ以外を冬とみなす
+  const currentSeason = () => (SUMMER_MONTHS.includes(new Date().getMonth() + 1) ? 'summer' : 'winter');
+  const REQ_MAX = 500;
   const LOC_NONE = ' ';       // 置き場所の絞り込みで「置き場所なし」を表す値(置き場所は前後の空白を取るので重ならない)
   const FIELD_LABEL = { bestBefore: '賞味期限', useBy: '使用期限' };
   const BACKUP_EVERY_DAYS = 60;
@@ -139,6 +149,65 @@
     };
   }
 
+  /** 必要リストの1行を整える。おかしな所は、わかる範囲で直して通す(捨てるのは、物ですらない行だけ) */
+  function sanitizeRequirement(raw, usedIds) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    let id = typeof raw.id === 'string' && /^r_[A-Za-z0-9_]{1,20}$/.test(raw.id) ? raw.id : newId('r');
+    while (usedIds.has(id)) id = newId('r');
+    usedIds.add(id);
+    const name = str(raw.name, 60) || '(名前なし)';
+    const f = raw.formula && typeof raw.formula === 'object' ? raw.formula : {};
+    const amount = num(f.amount);
+    // 条件は、知っている値だけ残す。1つも残らなければ「すべて」
+    const pick = (v, all) => {
+      const got = Object.keys(all).filter((k) => Array.isArray(v) && v.includes(k));
+      return got.length ? got : Object.keys(all);
+    };
+    const seen = new Set();
+    const names = (Array.isArray(raw.match?.names) ? raw.match.names : [])
+      .map((n) => str(n, 40))
+      .filter((n) => n && !seen.has(normKey(n)) && seen.add(normKey(n)))
+      .slice(0, 20);
+    const sources = Array.isArray(raw.sources)
+      ? raw.sources.map((x) => (typeof x === 'string' ? x : x && typeof x === 'object' ? str(x.title, 100) : '')).filter(Boolean).join('・')
+      : raw.sources;
+    return {
+      id,
+      name,
+      enabled: raw.enabled !== false,
+      priority: [1, 2, 3].includes(Number(raw.priority)) ? Number(raw.priority) : 2,
+      formula: {
+        type: Object.hasOwn(FORMULAS, f.type) ? f.type : 'fixed',
+        amount: amount === null ? 1 : amount,
+        unit: str(f.unit, 10) || '個',
+      },
+      places: pick(raw.places, PLACES),
+      seasons: pick(raw.seasons, SEASONS),
+      hazards: pick(raw.hazards, HAZARDS),
+      match: { names: names.length ? names : [name] },
+      origin: Object.hasOwn(ORIGINS, raw.origin) ? raw.origin : 'mine',
+      sources: str(sources, 300),
+      memo: str(raw.memo, 2000),
+      provisionalAmount: raw.provisionalAmount === true,
+    };
+  }
+
+  /** 最初の1回だけ、既定の必要リストを本物のデータとして入れる。消した行は戻らない */
+  function seedRequirements(st) {
+    const def = window.KURABITO_DEFAULT_REQUIREMENTS;
+    if (st.requirements.length || st.settings.requirementsSeeded || !def || !Array.isArray(def.requirements)) return st;
+    const ids = new Set();
+    st.requirements = def.requirements.map((r) => sanitizeRequirement(r, ids)).filter(Boolean);
+    st.settings.requirementsSeeded = true;
+    return st;
+  }
+
+  const SITUATION_KEYS = [['place', PLACES], ['season', SEASONS], ['hazard', HAZARDS]];
+  function sanitizeSituation(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    return SITUATION_KEYS.every(([k, all]) => Object.hasOwn(all, raw[k])) ? { place: raw.place, season: raw.season, hazard: raw.hazard } : null;
+  }
+
   function normalize(data) {
     const d = data && typeof data === 'object' ? data : {};
     const s = d.settings && typeof d.settings === 'object' ? d.settings : {};
@@ -160,24 +229,36 @@
         if (a.snoozeUntil || a.doneAt) alerts[k] = a;
       }
     }
-    // v2 以降で使う場所。第1版では中身に触らず、そのまま持ち回る。
+    // まだ使っていない場所。中身に触らず、そのまま持ち回る。
     const keep = (v) => (Array.isArray(v) ? v : []);
-    return {
+    const reqIds = new Set();
+    const requirements = (Array.isArray(d.requirements) ? d.requirements : [])
+      .slice(0, REQ_MAX)
+      .map((r) => sanitizeRequirement(r, reqIds))
+      .filter(Boolean);
+    const people = num(s.peopleCount);
+    const peopleCount = people === null ? 1 : Math.min(99, Math.max(1, Math.round(people)));
+    const infants = num(s.infantCount);
+    return seedRequirements({
       app: 'kurabito',
       schemaVersion: SCHEMA,
       settings: {
         leadDays: lead === null ? 30 : Math.min(365, Math.round(lead)),
         planDays: plan === null ? 7 : Math.min(60, Math.max(1, Math.round(plan))),
         lastExportAt: isDateStr(s.lastExportAt) ? s.lastExportAt : null,
+        peopleCount,                                                                    // 人数(乳幼児も含む全員)
+        infantCount: infants === null ? 0 : Math.min(peopleCount, Math.round(infants)),   // そのうち乳幼児
+        lastSituation: sanitizeSituation(s.lastSituation),
+        requirementsSeeded: s.requirementsSeeded === true,
       },
       genres,
       items,
       alerts,
       people: keep(d.people),
-      requirements: keep(d.requirements),
+      requirements,
       tips: keep(d.tips),
       scores: keep(d.scores),
-    };
+    });
   }
 
   function load() {
@@ -365,11 +446,13 @@
     g: ['kg', 0.001], 'グラム': ['kg', 0.001], kg: ['kg', 1], 'キログラム': ['kg', 1],
   };
   /** その品の量。1つあたりの量があれば 個数×量、なければ 個数×単位 */
-  function measure(it) {
-    const amount = it.amountPer !== null ? it.quantity * it.amountPer : it.quantity;
-    const unit = normKey(it.amountPer !== null ? it.amountUnit : it.unit);
+  function convUnit(amount, rawUnit) {
+    const unit = normKey(rawUnit);
     const conv = Object.hasOwn(UNIT_CONV, unit.toLowerCase()) ? UNIT_CONV[unit.toLowerCase()] : null;
     return conv ? { amount: amount * conv[1], unit: conv[0] } : { amount, unit };
+  }
+  function measure(it) {
+    return it.amountPer !== null ? convUnit(it.quantity * it.amountPer, it.amountUnit) : convUnit(it.quantity, it.unit);
   }
 
   /** その品が入る合計の行。まとめ名も単位も同じものだけ足す */
@@ -561,7 +644,7 @@
   let editingId = null;
 
   const FIELDS = ['name', 'yomi', 'genre', 'location', 'quantity', 'unit', 'minQuantity', 'group', 'amountPer', 'amountUnit', 'mark', 'avoidReason', 'bestBefore', 'useBy', 'reviewAt', 'leadDays', 'maker', 'model', 'size', 'memo'];
-  // コピーで空にする欄(数量・期限・見直し日・買い物の印・理由)。ほかは引き継ぐ
+  // コピーで引き継がない欄。個数は 1 から始め、期限・見直し日・買い物の印・理由は空にする。ほかは引き継ぐ
   const COPY_BLANK = new Set(['quantity', 'bestBefore', 'useBy', 'reviewAt', 'mark', 'avoidReason']);
   let copyMode = false;   // コピーで開いた新規登録フォームか
   let copyTags = [];      // コピー元から引き継ぐタグ(入力欄がないので別に持つ)
@@ -704,6 +787,7 @@
     if (dlg.open && (copyMode || editingId === null)) clearDraft();
     const values = {};
     for (const name of FIELDS) values[name] = COPY_BLANK.has(name) ? '' : String(src[name] ?? '');
+    values.quantity = '1';   // 1なら打たずに保存できるように
     openForm(null, { draft: values, copy: true, tags: src.tags.slice() });
   }
 
@@ -822,6 +906,343 @@
     renderAll();
     toast('削除しました');
   });
+
+  /* ---------- 備え(必要リストと持ち物の突き合わせ) ---------- */
+  // 量で数える単位。この単位の行は、単位が合う品だけを足す。ほかの単位(個・台・本…)は数量だけで比べる
+  const REQ_AMOUNT_UNITS = new Set(['L', 'kg', '食', '回', '枚']);
+  const unitAlias = (u) => (u === '回分' ? '回' : u === '食分' ? '食' : u);
+
+  const getSituation = () => state.settings.lastSituation || { place: 'home', season: currentSeason(), hazard: 'quake' };
+  const situationText = (sit) => `${PLACES[sit.place]}・${SEASONS[sit.season]}・${HAZARDS[sit.hazard]}`;
+
+  /** その品を、行の単位(unit)で数えた量。数えられないときは null */
+  function amountIn(it, unit) {
+    const m = measure(it);
+    if (unitAlias(m.unit) === unit) return m.amount;
+    if (it.amountPer !== null) {   // 1つあたりの量の単位は合わないが、品の単位そのものが合う
+      const q = convUnit(it.quantity, it.unit);
+      if (unitAlias(q.unit) === unit) return q.amount;
+    }
+    if (unit === '食' && it.amountPer === null) return it.quantity;   // 1個 = 1食 とみなす
+    return null;
+  }
+
+  /** 選んだ組み合わせに当てはまる行を、持ち物と突き合わせる */
+  function evalRequirements(sit) {
+    const { peopleCount, infantCount, planDays } = state.settings;
+    const mult = { perPersonPerDay: peopleCount * planDays, perPerson: peopleCount, fixed: 1, perInfant: infantCount };
+    const byKey = new Map();   // まとめ名(空なら品名) → 品
+    for (const it of state.items) {
+      const key = normKey(it.group || it.name);
+      if (!byKey.has(key)) byKey.set(key, []);
+      byKey.get(key).push(it);
+    }
+    const rows = [];
+    for (const r of state.requirements) {
+      if (!r.enabled || !r.places.includes(sit.place) || !r.seasons.includes(sit.season) || !r.hazards.includes(sit.hazard)) continue;
+      const f = r.formula;
+      const ru = convUnit(f.amount * mult[f.type], f.unit);
+      const unit = unitAlias(ru.unit);
+      const need = ru.amount;
+      if (!(need > 0)) continue;   // 乳幼児0人の行などは、数え込みからも一覧からも外す
+      const matched = [...new Set(r.match.names.flatMap((n) => byKey.get(normKey(n)) || []))];
+      // 在庫に数えるのは、数量があって「買いたい」でない品(「もう買わない」も、残っていれば在庫)
+      const stock = matched.filter((it) => it.quantity > 0 && it.mark !== 'buy');
+      const kind = unit === '式' ? 'set' : REQ_AMOUNT_UNITS.has(unit) ? 'amount' : 'count';
+      const mismatched = [];
+      let have = 0;
+      if (kind === 'amount') {
+        for (const it of stock) {
+          const v = amountIn(it, unit);
+          if (v === null) mismatched.push(it.name); else have += v;
+        }
+      } else {
+        have = stock.reduce((n, it) => n + it.quantity, 0);
+        // 「式」で家全体の行は、該当する品が1つ(数量1以上)あれば達成
+        if (kind === 'set' && f.type === 'fixed') have = have >= 1 ? need : 0;
+      }
+      const ratio = Math.min(1, have / need);
+      rows.push({
+        r, need, have, unit, kind, ratio,
+        ok: have >= need - 1e-9,
+        over: have > need + 1e-9,
+        anySet: kind === 'set' && f.type === 'fixed',
+        rough: kind === 'set' && f.type !== 'fixed',   // 人数分そろっているかは、数量の合計で見る(目安)
+        noItems: matched.length === 0,
+        onlyBuy: stock.length === 0 && matched.some((it) => it.mark === 'buy'),
+        mismatched: [...new Set(mismatched)],
+      });
+    }
+    return rows;
+  }
+
+  const pct = (x) => Math.floor(x * 100 + 1e-9);
+  const avgRatio = (rows) => (rows.length ? rows.reduce((n, x) => n + x.ratio, 0) / rows.length : null);
+  const haveText = (x) => (x.anySet ? (x.have > 0 ? 'あり' : 'なし') : `${fmtNum(x.have)}${x.unit}`);
+  const needText = (x) => `${fmtNum(x.need)}${x.unit}`;
+
+  function formulaText(r) {
+    const f = r.formula;
+    const a = `${fmtNum(f.amount)}${f.unit}`;
+    return { perPersonPerDay: `${a} × 人数 × 日数`, perPerson: `${a} × 人数`, fixed: `${a}(家全体で)`, perInfant: `${a} × 乳幼児の人数` }[f.type];
+  }
+  function conditionText(r) {
+    const part = (label, got, all) => (got.length === Object.keys(all).length ? null : `${label}: ${got.map((k) => all[k]).join('・')}`);
+    return [part('避難先', r.places, PLACES), part('季節', r.seasons, SEASONS), part('災害', r.hazards, HAZARDS)].filter(Boolean).join(' / ') || 'すべての条件';
+  }
+  /** 行の詳細(メモ・出典・出典区分・仮置きの印) */
+  function reqDetail(r) {
+    return el('details', { class: 'req-detail' }, [
+      el('summary', { text: 'くわしく' }),
+      el('p', { text: `数え方: ${formulaText(r)}` }),
+      el('p', { text: `条件: ${conditionText(r)}` }),
+      el('p', { text: `突き合わせるまとめ名: ${r.match.names.join('、')}` }),
+      el('p', { text: `出典区分: ${ORIGINS[r.origin]}` }),
+      r.sources && el('p', { text: `出典: ${r.sources}` }),
+      r.memo && el('p', { class: 'memo', text: `メモ: ${r.memo}` }),
+      r.provisionalAmount && el('p', { text: '必要量は仮置きです(あとで見直す)。' }),
+    ]);
+  }
+  /** 突き合わせの知らせ(黙って捨てない) */
+  function reqNotes(x) {
+    const r = x.r;
+    return [
+      x.noItems && el('p', { class: 'note' }, [
+        el('span', { text: `持ち物にこのまとめ名の品がありません(${r.match.names.join('、')})。名前の違いかもしれません。 ` }),
+        el('button', { type: 'button', class: 'btn small', text: 'まとめ名を直す', 'aria-label': `${r.name} のまとめ名を直す`, on: { click: () => openReqForm(r, true) } }),
+      ]),
+      x.onlyBuy && el('p', { class: 'note', text: '「買いたい」の印の品だけがあります(在庫には数えません)。' }),
+      x.mismatched.length > 0 && el('p', { class: 'note', text: `単位が合わない品: ${x.mismatched.join('、')}(「1つあたりの量」を ${x.unit} で入れると数えられます)` }),
+      x.rough && el('p', { class: 'note', text: '人数分あるかは、当てはまる品の数量の合計で見ています(目安)。' }),
+      r.provisionalAmount && el('p', { class: 'note', text: '必要量は仮置きです。' }),
+    ];
+  }
+
+  let sonaeEditing = false;   // 「必要リストを編集」の画面を出しているか
+
+  function renderSonae() {
+    $('#sonae-main').hidden = sonaeEditing;
+    $('#sonae-edit').hidden = !sonaeEditing;
+    if (sonaeEditing) return renderReqList();
+    const sit = getSituation();
+    for (const [k] of SITUATION_KEYS) $(`#sit-${k}`).value = sit[k];
+    const { peopleCount, infantCount, planDays } = state.settings;
+    $('#sonae-basis').textContent = `${peopleCount}人(うち乳幼児 ${infantCount}人)・${planDays}日分で計算しています。人数と日数は「設定」で変えられます。`;
+
+    const rows = evalRequirements(sit);
+    const short = rows.filter((x) => !x.ok);
+    const done = rows.filter((x) => x.ok);
+    // 優先度1の不足 → 優先度の小さい順 → 同じ優先度の中では不足の割合が大きい順
+    short.sort((a, b) => a.r.priority - b.r.priority || a.ratio - b.ratio || byReqName(a, b));
+    done.sort((a, b) => a.r.priority - b.r.priority || byReqName(a, b));
+
+    const top = short.filter((x) => x.r.priority === 1);
+    const alertBox = $('#sonae-alert');
+    alertBox.hidden = top.length === 0;
+    alertBox.replaceChildren(
+      el('strong', { text: `【不足】命・衛生に関わる物が ${top.length}件 足りません` }),
+      el('p', { text: top.map((x) => x.r.name).join('、') }),
+    );
+
+    const rate = $('#sonae-rate');
+    if (rows.length === 0) {
+      rate.replaceChildren(el('p', { class: 'hint', text: 'この組み合わせに当てはまる必要リストがありません。「必要リストを編集」で足せます。' }));
+    } else {
+      const p1 = avgRatio(rows.filter((x) => x.r.priority === 1));
+      rate.replaceChildren(
+        el('p', { class: 'sit', text: situationText(sit) }),
+        el('p', { class: 'big' }, [el('span', { text: '達成率 ' }), el('b', { text: `${pct(avgRatio(rows))}%` })]),
+        el('p', { text: p1 === null ? '優先度1(命・衛生)に当てはまる行はありません' : `優先度1(命・衛生)だけ: ${pct(p1)}%` }),
+        el('p', { class: 'hint', text: `そろっている ${done.length}件 / 当てはまる ${rows.length}件(不足 ${short.length}件)` }),
+      );
+    }
+
+    $('#sonae-short-title').textContent = short.length ? `足りない物(${short.length}件)` : '足りない物';
+    $('#sonae-short').replaceChildren(...(short.length ? short.map((x) => {
+      const r = x.r;
+      const lack = x.need - x.have;
+      return el('article', { class: `card ${r.priority === 1 ? 'over' : 'soon'}` }, [
+        el('h3', { text: r.name }),
+        el('p', { class: 'what', text: `不足 ・ 在庫 ${haveText(x)} / 必要 ${needText(x)}` }),
+        el('p', { class: 'sub', text: `あと ${fmtNum(lack)}${x.unit}(必要の${100 - pct(x.ratio)}%不足) ・ 優先度${r.priority} ${PRIORITIES[r.priority]}` }),
+        ...reqNotes(x),
+        reqDetail(r),
+        el('div', { class: 'actions' }, [
+          el('button', { type: 'button', class: 'btn small', text: '編集', 'aria-label': `${r.name} を編集`, on: { click: () => openReqForm(r) } }),
+        ]),
+      ]);
+    }) : [el('div', { class: 'empty' }, [
+      el('strong', { text: rows.length ? '足りない物はありません' : '当てはまる行がありません' }),
+      rows.length > 0 && el('span', { text: 'この組み合わせの必要リストは、すべてそろっています。' }),
+    ])]));
+
+    $('#sonae-ok-box').hidden = done.length === 0;
+    $('#sonae-ok-title').textContent = `そろっている物(${done.length}件)`;
+    $('#sonae-ok').replaceChildren(...done.map((x) => el('li', {}, [
+      el('span', { class: 'g', text: x.r.name }),
+      el('span', { text: `そろっている ・ 在庫 ${haveText(x)} / 必要 ${needText(x)}${x.over ? ' ・ 多め' : ''}` }),
+      ...reqNotes(x),
+    ])));
+  }
+  const byReqName = (a, b) => a.r.name.localeCompare(b.r.name, 'ja');
+
+  /* 必要リストを編集 */
+  function renderReqList() {
+    const all = state.requirements;
+    $('#req-count').textContent = `${all.length}件(うち無効 ${all.filter((r) => !r.enabled).length}件)。無効の行は、備えの計算に入りません。`;
+    $('#req-list').replaceChildren(...all.map((r) => {
+      const toggle = el('input', { type: 'checkbox', checked: r.enabled, 'aria-label': `${r.name} を有効にする` });
+      toggle.checked = r.enabled;
+      toggle.addEventListener('change', () => { r.enabled = toggle.checked; save(); renderSonae(); });
+      return el('li', { class: r.enabled ? 'req' : 'req off' }, [
+        el('div', { class: 'req-head' }, [
+          el('label', { class: 'req-on' }, [toggle, el('span', { text: r.enabled ? '有効' : '無効' })]),
+          el('div', { class: 'name', text: r.name }),
+        ]),
+        el('p', { class: 'sub', text: `優先度${r.priority} ${PRIORITIES[r.priority]} ・ ${formulaText(r)}${r.provisionalAmount ? '(仮置き)' : ''}` }),
+        el('p', { class: 'sub', text: `${conditionText(r)} ・ ${ORIGINS[r.origin]}` }),
+        reqDetail(r),
+        el('div', { class: 'actions' }, [
+          el('button', { type: 'button', class: 'btn small', text: '編集', 'aria-label': `${r.name} を編集`, on: { click: () => openReqForm(r) } }),
+          el('button', { type: 'button', class: 'btn small warn', text: '削除', 'aria-label': `${r.name} を削除`, on: { click: () => deleteReq(r) } }),
+        ]),
+      ]);
+    }));
+  }
+
+  function deleteReq(r) {
+    if (!confirm(`必要リストから「${r.name}」を削除します。よろしいですか？`)) return;
+    state.requirements = state.requirements.filter((x) => x !== r);
+    save();
+    renderSonae();
+    toast('削除しました');
+  }
+
+  /* 必要リストの追加・編集フォーム */
+  const reqDlg = $('#req-dlg');
+  const reqForm = $('#req-form');
+  let reqEditingId = null;
+  let reqNames = [];   // 突き合わせるまとめ名
+
+  function renderReqNames() {
+    $('#rq-names').replaceChildren(...reqNames.map((n) => el('button', {
+      type: 'button', class: 'chip', text: `${n} ✕`, 'aria-label': `まとめ名「${n}」を外す`,
+      on: { click: () => { reqNames = reqNames.filter((x) => x !== n); renderReqNames(); } },
+    })));
+  }
+  function addReqName() {
+    const input = $('#rq-name-new');
+    const n = str(input.value, 40);
+    input.value = '';
+    if (!n || reqNames.some((x) => normKey(x) === normKey(n)) || reqNames.length >= 20) return;
+    reqNames.push(n);
+    renderReqNames();
+  }
+  const reqChecks = (name) => [...reqForm.querySelectorAll(`input[name="${name}"]`)];
+
+  function openReqForm(r, focusNames) {
+    reqEditingId = r ? r.id : null;
+    $('#req-dlg-title').textContent = r ? '必要な物を編集' : '必要な物を足す';
+    $('#req-error').hidden = true;
+    reqForm.reset();
+    const f = reqForm.elements;
+    const v = r || { name: '', priority: 2, formula: { type: 'fixed', amount: 1, unit: '個' }, places: Object.keys(PLACES), seasons: Object.keys(SEASONS), hazards: Object.keys(HAZARDS), match: { names: [] }, sources: '', memo: '', provisionalAmount: false };
+    f.name.value = v.name;
+    f.priority.value = String(v.priority);
+    f.ftype.value = v.formula.type;
+    f.amount.value = String(v.formula.amount);
+    f.unit.value = v.formula.unit;
+    for (const [field, got] of [['place', v.places], ['season', v.seasons], ['hazard', v.hazards]]) {
+      for (const box of reqChecks(field)) box.checked = got.includes(box.value);
+    }
+    f.sources.value = v.sources;
+    f.memo.value = v.memo;
+    f.provisional.checked = v.provisionalAmount;
+    reqNames = v.match.names.slice();
+    renderReqNames();
+    // まとめ名の候補: 持ち物で使っているまとめ名(空の品は品名)
+    const cands = new Map();
+    for (const it of state.items) {
+      const label = it.group || it.name;
+      if (!cands.has(normKey(label))) cands.set(normKey(label), label);
+    }
+    $('#dl-req-names').replaceChildren(...[...cands.values()].sort((a, b) => a.localeCompare(b, 'ja')).map((g) => el('option', { value: g })));
+    reqDlg.showModal();
+    reqDlg.scrollTop = 0;
+    if (focusNames) $('#rq-name-new').focus(); else if (!r) f.name.focus();
+  }
+
+  reqForm.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const f = reqForm.elements;
+    const err = $('#req-error');
+    const fail = (msg, field) => { err.textContent = msg; err.hidden = false; field?.focus(); };
+    if (!f.name.value.trim()) return fail('名前を入れてください。', f.name);
+    if (!(num(f.amount.value) > 0)) return fail('量は0より大きい数字で入れてください。', f.amount);
+    if (!f.unit.value.trim()) return fail('単位を入れてください(L、食、個、式 など)。', f.unit);
+    const picked = {};
+    for (const [field, label] of [['place', '避難先'], ['season', '季節'], ['hazard', '災害']]) {
+      picked[field] = reqChecks(field).filter((b) => b.checked).map((b) => b.value);
+      if (picked[field].length === 0) return fail(`${label}を1つ以上選んでください。`, reqChecks(field)[0]);
+    }
+    addReqName();   // 入力欄に書きかけのまとめ名があれば、それも入れる
+    const old = state.requirements.find((r) => r.id === reqEditingId);
+    const ids = new Set(state.requirements.filter((r) => r !== old).map((r) => r.id));
+    const row = sanitizeRequirement({
+      ...(old || { id: newId('r'), enabled: true, origin: 'mine' }),   // 新しく足した行は「自分メモ」
+      name: f.name.value,
+      priority: f.priority.value,
+      formula: { type: f.ftype.value, amount: f.amount.value, unit: f.unit.value },
+      places: picked.place, seasons: picked.season, hazards: picked.hazard,
+      match: { names: reqNames },   // 空なら、名前そのものを使う
+      sources: f.sources.value,
+      memo: f.memo.value,
+      provisionalAmount: f.provisional.checked,
+    }, ids);
+    if (old) state.requirements[state.requirements.indexOf(old)] = row; else state.requirements.push(row);
+    if (save()) {
+      reqDlg.close();
+      renderSonae();
+      toast(old ? '保存しました' : '足しました');
+    }
+  });
+  $('#rq-name-add').addEventListener('click', addReqName);
+  $('#rq-name-new').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); addReqName(); } });
+  $('#b-req-cancel').addEventListener('click', () => reqDlg.close());
+
+  /** 必要リストだけの取り込み。id が既にある行は飛ばし、新しい id の行だけ足す */
+  function importRequirements(file) {
+    if (!file) return;
+    const out = $('#req-import-result');
+    const say = (msg) => { out.textContent = msg; toast(msg); };
+    if (file.size > 5 * 1024 * 1024) return say('ファイルが大きすぎます。');
+    const reader = new FileReader();
+    reader.onerror = () => say('ファイルを読めませんでした。');
+    reader.onload = () => {
+      let data;
+      try { data = JSON.parse(String(reader.result)); } catch { return say('必要リストのファイルではないようです。'); }
+      if (!data || data.kind !== 'requirements' || !Array.isArray(data.requirements)) {
+        return say(data?.app === 'kurabito' ? 'これはバックアップのファイルです。「バックアップ」の「読み込む」を使ってください。' : '必要リストのファイルではないようです。');
+      }
+      if (Number(data.schema) > 1) return say('新しい版で作られたファイルです。アプリを更新してから取り込んでください。');
+      const ids = new Set(state.requirements.map((r) => r.id));
+      let added = 0;
+      let skipped = 0;
+      let broken = 0;
+      for (const raw of data.requirements) {
+        if (raw && typeof raw.id === 'string' && ids.has(raw.id)) { skipped += 1; continue; }
+        const row = state.requirements.length < REQ_MAX ? sanitizeRequirement(raw, ids) : null;
+        if (!row) { broken += 1; continue; }
+        state.requirements.push(row);
+        added += 1;
+      }
+      state.settings.requirementsSeeded = true;
+      save();
+      renderAll();
+      say(`必要リストに ${added}件 を足しました。すでにある ${skipped}件 は飛ばしました。${broken ? `読めなかった行: ${broken}件。` : ''}`);
+    };
+    reader.readAsText(file);
+  }
 
   /* ---------- 書き出し・読み込み ---------- */
   async function exportData() {
@@ -1001,6 +1422,9 @@
   function renderSettings() {
     renderGenres();
     $('#s-lead').value = String(state.settings.leadDays);
+    $('#s-people').value = String(state.settings.peopleCount);
+    $('#s-infants').value = String(state.settings.infantCount);
+    $('#s-days').value = String(state.settings.planDays);
     const last = state.settings.lastExportAt;
     $('#last-export').textContent = last ? `最後の書き出し: ${fmtDate(last)}` : 'まだ書き出していません。';
     $('#ver').textContent = VERSION;
@@ -1028,15 +1452,16 @@
     renderGenreOptions();
     renderTodo();
     renderList();
+    renderSonae();
     renderSettings();
   }
 
   function showView(name) {
-    for (const v of ['todo', 'list', 'settings']) {
+    for (const v of ['todo', 'list', 'sonae', 'settings']) {
       $(`#view-${v}`).hidden = v !== name;
       $(`#tab-${v}`).setAttribute('aria-selected', String(v === name));
     }
-    $('#fab').hidden = name === 'settings';
+    $('#fab').hidden = name === 'settings' || name === 'sonae';
     window.scrollTo(0, 0);
   }
 
@@ -1060,6 +1485,31 @@
       save();
       renderAll();
     });
+    // 備え
+    for (const [k, all] of SITUATION_KEYS) {
+      const sel = $(`#sit-${k}`);
+      sel.replaceChildren(...Object.entries(all).map(([value, text]) => el('option', { value, text })));
+      sel.addEventListener('change', () => {
+        // 選んだ組み合わせを覚えて、次に開いたときそこから始める
+        state.settings.lastSituation = { place: $('#sit-place').value, season: $('#sit-season').value, hazard: $('#sit-hazard').value };
+        save();
+        renderSonae();
+      });
+    }
+    const setEditing = (on) => () => { sonaeEditing = on; renderSonae(); window.scrollTo(0, 0); };
+    $('#b-req-edit').addEventListener('click', setEditing(true));
+    $('#b-req-back').addEventListener('click', setEditing(false));
+    $('#b-req-add').addEventListener('click', () => openReqForm(null));
+    for (const [id, key, min, max, def] of [['#s-people', 'peopleCount', 1, 99, 1], ['#s-infants', 'infantCount', 0, 99, 0], ['#s-days', 'planDays', 1, 60, 7]]) {
+      $(id).addEventListener('change', (ev) => {
+        const n = num(ev.target.value);
+        state.settings[key] = n === null ? def : Math.min(max, Math.max(min, Math.round(n)));
+        state.settings.infantCount = Math.min(state.settings.infantCount, state.settings.peopleCount);   // 乳幼児は人数のうち
+        save();
+        renderAll();
+      });
+    }
+    $('#b-req-import').addEventListener('change', (ev) => { importRequirements(ev.target.files[0]); ev.target.value = ''; });
     $('#b-export').addEventListener('click', exportData);
     $('#b-import').addEventListener('change', (ev) => { importData(ev.target.files[0]); ev.target.value = ''; });
     $('#b-wipe').addEventListener('click', () => {
@@ -1070,6 +1520,7 @@
       clearDraft(COPY_DRAFT_KEY);
       state = normalize(null);
       groupFilter = null;
+      sonaeEditing = false;
       renderAll();
       toast('すべて消しました');
     });

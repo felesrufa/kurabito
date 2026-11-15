@@ -62,6 +62,38 @@
       <ul id="item-list" class="items"></ul>
     </section>
 
+    <!-- 備え -->
+    <section id="view-sonae" class="view" hidden aria-labelledby="tab-sonae">
+      <h2 class="view-title">備え</h2>
+      <div id="sonae-main">
+        <div class="row3">
+          <select id="sit-place" aria-label="避難先"></select>
+          <select id="sit-season" aria-label="季節"></select>
+          <select id="sit-hazard" aria-label="災害"></select>
+        </div>
+        <p class="hint" id="sonae-basis"></p>
+        <div id="sonae-alert" class="alert-top" role="status" hidden></div>
+        <div id="sonae-rate" class="panel rate"></div>
+        <h3 class="sec-title" id="sonae-short-title">足りない物</h3>
+        <div id="sonae-short" class="cards"></div>
+        <details id="sonae-ok-box" class="totals" hidden>
+          <summary id="sonae-ok-title">そろっている物</summary>
+          <ul id="sonae-ok"></ul>
+        </details>
+        <div class="btns sonae-btns">
+          <button type="button" id="b-req-edit" class="btn">必要リストを編集</button>
+        </div>
+      </div>
+      <div id="sonae-edit" hidden>
+        <div class="btns sonae-btns">
+          <button type="button" id="b-req-back" class="btn">← 備えに戻る</button>
+          <button type="button" id="b-req-add" class="btn primary">必要な物を足す</button>
+        </div>
+        <p class="hint" id="req-count"></p>
+        <ul id="req-list" class="reqs"></ul>
+      </div>
+    </section>
+
     <!-- 設定 -->
     <section id="view-settings" class="view" hidden aria-labelledby="tab-settings">
       <h2 class="view-title">設定</h2>
@@ -73,6 +105,31 @@
           <input type="number" id="s-lead" min="0" max="365" inputmode="numeric">
         </label>
         <p class="hint">品目ごとに変えたいときは、その品の編集画面で指定できます。</p>
+      </div>
+
+      <div class="panel">
+        <h3>備えの計算</h3>
+        <div class="grid3">
+          <label class="field"><span>人数</span>
+            <input type="number" id="s-people" min="1" max="99" inputmode="numeric"></label>
+          <label class="field"><span>うち乳幼児</span>
+            <input type="number" id="s-infants" min="0" max="99" inputmode="numeric"></label>
+          <label class="field"><span>何日分</span>
+            <input type="number" id="s-days" min="1" max="60" inputmode="numeric"></label>
+        </div>
+        <p class="hint">「備え」タブの必要量の計算に使います。人数には乳幼児も含めます。この端末の中にだけ保存されます。</p>
+      </div>
+
+      <div class="panel">
+        <h3>必要リスト</h3>
+        <p class="hint">必要リストだけのファイルを取り込みます。すでにある行(同じ id)は飛ばし、新しい行だけ足します。バックアップの読み込みとは別です。</p>
+        <div class="btns">
+          <label class="btn">
+            必要リストを取り込む
+            <input type="file" id="b-req-import" accept="application/json,.json" hidden>
+          </label>
+        </div>
+        <p class="hint" id="req-import-result" role="status"></p>
       </div>
 
       <div class="panel">
@@ -118,6 +175,7 @@
   <nav class="tabs" role="tablist">
     <button type="button" role="tab" id="tab-todo" data-view="todo" aria-selected="true">対応待ち<span class="badge" id="badge" hidden></span></button>
     <button type="button" role="tab" id="tab-list" data-view="list" aria-selected="false">一覧</button>
+    <button type="button" role="tab" id="tab-sonae" data-view="sonae" aria-selected="false">備え</button>
     <button type="button" role="tab" id="tab-settings" data-view="settings" aria-selected="false">設定</button>
   </nav>
 
@@ -149,8 +207,10 @@
           <input name="minQuantity" type="number" min="0" step="any" inputmode="decimal" placeholder="なし"></label>
       </div>
       <div class="qty-steps" aria-label="個数をすばやく変える">
+        <button type="button" data-step="-10" class="btn small">−10</button>
         <button type="button" data-step="-1" class="btn small">−1</button>
         <button type="button" data-step="1" class="btn small">＋1</button>
+        <button type="button" data-step="10" class="btn small">＋10</button>
       </div>
 
       <label class="field"><span>買い物の印</span>
@@ -214,6 +274,84 @@
     </form>
   </dialog>
 
+  <!-- 必要リストの追加・編集 -->
+  <dialog id="req-dlg" class="dlg">
+    <form id="req-form" method="dialog" novalidate>
+      <h2 id="req-dlg-title">必要な物を足す</h2>
+
+      <label class="field"><span>名前 <em>必須</em></span>
+        <input name="name" required maxlength="60" autocomplete="off"></label>
+
+      <label class="field"><span>優先度</span>
+        <select name="priority">
+          <option value="1">1 命・衛生に関わる</option>
+          <option value="2">2 あると助かる</option>
+          <option value="3">3 あれば快適</option>
+        </select></label>
+
+      <label class="field"><span>数え方</span>
+        <select name="ftype">
+          <option value="perPersonPerDay">1人1日あたり(量 × 人数 × 日数)</option>
+          <option value="perPerson">1人あたり(量 × 人数)</option>
+          <option value="fixed">家全体で(量そのまま)</option>
+          <option value="perInfant">乳幼児1人あたり(量 × 乳幼児の人数)</option>
+        </select></label>
+
+      <div class="grid2">
+        <label class="field"><span>量</span>
+          <input name="amount" type="number" min="0" step="any" inputmode="decimal"></label>
+        <label class="field"><span>単位</span>
+          <input name="unit" list="dl-req-unit" maxlength="10" autocomplete="off"></label>
+      </div>
+      <label class="check"><input type="checkbox" name="provisional"> <span>この量は仮置き(あとで見直す)</span></label>
+      <p class="hint">単位が L・食・回・枚 のときは、単位が合う品だけを足します。「式」は、当てはまる品があれば達成です。ほかの単位は数量だけで比べます。</p>
+
+      <fieldset class="checks"><legend>避難先</legend>
+        <label class="check"><input type="checkbox" name="place" value="home"> <span>自宅避難</span></label>
+        <label class="check"><input type="checkbox" name="place" value="shelter"> <span>避難所</span></label>
+        <label class="check"><input type="checkbox" name="place" value="camp"> <span>野営</span></label>
+      </fieldset>
+      <fieldset class="checks"><legend>季節</legend>
+        <label class="check"><input type="checkbox" name="season" value="summer"> <span>夏</span></label>
+        <label class="check"><input type="checkbox" name="season" value="winter"> <span>冬</span></label>
+      </fieldset>
+      <fieldset class="checks"><legend>災害</legend>
+        <label class="check"><input type="checkbox" name="hazard" value="quake"> <span>地震</span></label>
+        <label class="check"><input type="checkbox" name="hazard" value="typhoon"> <span>台風</span></label>
+        <label class="check"><input type="checkbox" name="hazard" value="tsunami"> <span>津波</span></label>
+        <label class="check"><input type="checkbox" name="hazard" value="ash"> <span>富士山噴火</span></label>
+      </fieldset>
+
+      <div class="field"><span>突き合わせるまとめ名 <small>(持ち物のまとめ名。空なら名前を使う)</small></span>
+        <div id="rq-names" class="chips"></div>
+        <div class="genre-add">
+          <input id="rq-name-new" list="dl-req-names" maxlength="40" placeholder="まとめ名を足す" autocomplete="off" aria-label="足すまとめ名">
+          <button type="button" id="rq-name-add" class="btn">足す</button>
+        </div>
+      </div>
+
+      <label class="field"><span>出典</span>
+        <input name="sources" maxlength="300" autocomplete="off"></label>
+      <label class="field"><span>メモ</span>
+        <textarea name="memo" rows="3" maxlength="2000"></textarea></label>
+
+      <p class="error" id="req-error" role="alert" hidden></p>
+
+      <div class="dlg-btns">
+        <span class="spacer"></span>
+        <button type="button" id="b-req-cancel" class="btn">やめる</button>
+        <button type="submit" class="btn primary">保存</button>
+      </div>
+    </form>
+  </dialog>
+  <datalist id="dl-req-names"></datalist>
+  <datalist id="dl-req-unit">
+    <option value="L"><option value="食"><option value="回"><option value="枚">
+    <option value="個"><option value="本"><option value="台"><option value="式">
+    <option value="箱"><option value="袋"><option value="パック"><option value="組">
+    <option value="足"><option value="着"><option value="灯"><option value="巻">
+  </datalist>
+
   <!-- 書きかけの入力を戻すか聞く -->
   <dialog id="draft-dlg" class="dlg">
     <h2>書きかけの入力があります。続けますか？</h2>
@@ -239,6 +377,7 @@
 
   <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
+  <script src="requirements-default.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
