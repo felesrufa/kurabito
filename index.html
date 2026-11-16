@@ -133,6 +133,39 @@
       </div>
 
       <div class="panel">
+        <h3>Tips</h3>
+        <p class="hint">品の編集画面に出す覚え書きです。まとめ名(空なら品名)かジャンルが合う品に出ます。出典のURLは文字として表示するだけで、開きません。</p>
+        <div class="btns">
+          <button type="button" id="b-tip-add" class="btn primary">Tips を足す</button>
+          <label class="btn">
+            Tips を取り込む
+            <input type="file" id="b-tips-import" accept="application/json,.json" hidden>
+          </label>
+        </div>
+        <p class="hint" id="tips-import-result" role="status"></p>
+        <details class="fold">
+          <summary id="tips-title">Tips の一覧</summary>
+          <ul id="tips-list" class="reqs"></ul>
+        </details>
+      </div>
+
+      <div class="panel">
+        <h3>製品の採点</h3>
+        <p class="hint">会話のClaudeなどが作った採点のファイルを取り込みます。メーカーと型番がどちらも合う品に出ます。同じメーカー・型番の採点は上書きします。</p>
+        <div class="btns">
+          <label class="btn">
+            採点を取り込む
+            <input type="file" id="b-scores-import" accept="application/json,.json" hidden>
+          </label>
+        </div>
+        <p class="hint" id="scores-import-result" role="status"></p>
+        <details class="fold">
+          <summary id="scores-title">採点の一覧</summary>
+          <ul id="scores-list" class="reqs"></ul>
+        </details>
+      </div>
+
+      <div class="panel">
         <h3>ジャンル</h3>
         <p class="hint">名前はその場で書き換えられます。↑↓で並べ替え。最初の4つは消せません。</p>
         <ul id="genre-list" class="genres"></ul>
@@ -191,6 +224,8 @@
       <label class="field"><span>よみがな <small>(並び順用・空でもよい)</small></span>
         <input name="yomi" maxlength="100" autocomplete="off"></label>
       <p class="hint" id="yomi-auto" role="status" hidden>自動で入れました。違えば直してください</p>
+      <div id="item-score" class="info-box" hidden></div>
+      <div id="item-tips" class="info-box" hidden></div>
 
       <div class="grid2">
         <label class="field"><span>ジャンル</span>
@@ -352,6 +387,47 @@
     <option value="箱"><option value="袋"><option value="パック"><option value="組">
     <option value="足"><option value="着"><option value="灯"><option value="巻">
   </datalist>
+
+  <!-- Tips の追加・編集 -->
+  <dialog id="tip-dlg" class="dlg">
+    <form id="tip-form" method="dialog" novalidate>
+      <h2 id="tip-dlg-title">Tips を足す</h2>
+
+      <label class="field"><span>本文 <em>必須</em></span>
+        <textarea name="text" rows="4" maxlength="1000" required></textarea></label>
+
+      <label class="field"><span>印</span>
+        <select name="status">
+          <option value="verified">公的資料で確認</option>
+          <option value="experience">体験談</option>
+          <option value="mine">自分メモ</option>
+        </select></label>
+
+      <div class="field"><span>このまとめ名の品に出す <small>(まとめ名が空の品は品名で比べる)</small></span>
+        <div id="tp-names" class="chips"></div>
+        <div class="genre-add">
+          <input id="tp-name-new" list="dl-tip-names" maxlength="40" placeholder="まとめ名を足す" autocomplete="off" aria-label="足すまとめ名">
+          <button type="button" id="tp-name-add" class="btn">足す</button>
+        </div>
+      </div>
+
+      <fieldset class="checks" id="tp-genres"></fieldset>
+
+      <div class="field"><span>出典 <small>(URLは文字として保存し、リンクにはしません)</small></span>
+        <div id="tp-sources"></div>
+        <div><button type="button" id="tp-source-add" class="btn small">出典を足す</button></div>
+      </div>
+
+      <p class="error" id="tip-error" role="alert" hidden></p>
+
+      <div class="dlg-btns">
+        <span class="spacer"></span>
+        <button type="button" id="b-tip-cancel" class="btn">やめる</button>
+        <button type="submit" class="btn primary">保存</button>
+      </div>
+    </form>
+  </dialog>
+  <datalist id="dl-tip-names"></datalist>
 
   <!-- 書きかけの入力を戻すか聞く -->
   <dialog id="draft-dlg" class="dlg">

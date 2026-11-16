@@ -5,7 +5,7 @@
 (() => {
   'use strict';
 
-  const VERSION = '0.5.1';
+  const VERSION = '0.6.0';
   const KEY = 'kurabito:v1';
   const DRAFT_KEY = 'kurabito:draft';
   const COPY_DRAFT_KEY = 'kurabito:draft-copy';   // 「この品をコピー」の下書き。コピー元の下書きとは別に持つ
@@ -29,6 +29,13 @@
   const SUMMER_MONTHS = [5, 6, 7, 8, 9, 10];   // 暫定: 5〜10月を夏、それ以外を冬とみなす
   const currentSeason = () => (SUMMER_MONTHS.includes(new Date().getMonth() + 1) ? 'summer' : 'winter');
   const REQ_MAX = 500;
+  // Tips の印(いつも文字で見せる)
+  const TIP_STATUS = { verified: '公的資料で確認', experience: '体験談', mine: '自分メモ' };
+  const TIPS_MAX = 500;
+  // 採点の必須条件(色だけでなく、記号と文字で見せる)
+  const REQUIRED_STATUS = { ok: '✓ 満たす', ng: '✕ 満たさない', unknown: '未確認' };
+  const SCORED_BY = { 'claude-chat': '会話のClaude', auto: '自動' };
+  const SCORES_MAX = 300;
   const LOC_NONE = ' ';       // 置き場所の絞り込みで「置き場所なし」を表す値(置き場所は前後の空白を取るので重ならない)
   const FIELD_LABEL = { bestBefore: '賞味期限', useBy: '使用期限' };
   const BACKUP_EVERY_DAYS = 60;
@@ -192,6 +199,87 @@
     };
   }
 
+  /** 出典を { title, url } の並びにそろえる(文字だけの出典は題名として持つ) */
+  function sanitizeSources(raw) {
+    return (Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : [])
+      .map((x) => (typeof x === 'string' ? { title: str(x, 100), url: '' } : x && typeof x === 'object' ? { title: str(x.title, 100), url: str(x.url, 300) } : null))
+      .filter((x) => x && (x.title || x.url))
+      .slice(0, 10);
+  }
+  const uniqStrs = (raw, max, limit) => {
+    const seen = new Set();
+    return (Array.isArray(raw) ? raw : []).map((n) => str(n, max)).filter((n) => n && !seen.has(normKey(n)) && seen.add(normKey(n))).slice(0, limit);
+  };
+
+  /** Tips の1件を整える。本文のないものだけ捨てる */
+  function sanitizeTip(raw, usedIds) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const text = str(raw.text, 1000);
+    if (!text) return null;
+    let id = typeof raw.id === 'string' && /^t_[A-Za-z0-9_]{1,20}$/.test(raw.id) ? raw.id : newId('t');
+    while (usedIds.has(id)) id = newId('t');
+    usedIds.add(id);
+    const rel = raw.related && typeof raw.related === 'object' ? raw.related : {};
+    return {
+      id,
+      text,
+      status: Object.hasOwn(TIP_STATUS, raw.status) ? raw.status : 'mine',
+      related: {
+        names: uniqStrs(rel.names, 40, 20),   // 品のまとめ名(空なら品名)と比べる
+        // ジャンルの識別子(表示名ではない)。いま無いジャンルの識別子も、形が正しければ残す
+        genres: [...new Set((Array.isArray(rel.genres) ? rel.genres : []).filter((g) => typeof g === 'string' && (isBuiltinGenre(g) || /^g_[a-z0-9]{4,14}$/.test(g))))].slice(0, 20),
+      },
+      sources: sanitizeSources(raw.sources),
+    };
+  }
+
+  const scoreKey = (maker, model) => `${normKey(maker)}\n${normKey(model)}`;
+  /** 製品の採点の1件を整える。メーカーと型番がそろっていないものだけ捨てる(品と突き合わせられないため) */
+  function sanitizeScore(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const maker = str(raw.maker, 40);
+    const model = str(raw.model, 40);
+    if (!maker || !model) return null;
+    const unknown = uniqStrs(raw.unknown, 60, 30);
+    const criteria = [];
+    for (const c of Array.isArray(raw.criteria) ? raw.criteria.slice(0, 30) : []) {
+      if (!c || typeof c !== 'object') continue;
+      const name = str(c.name, 60);
+      if (!name) continue;
+      const score = num(c.score);
+      const max = num(c.max);
+      // 点か満点が数でない項目は、点を付けずに「裏が取れなかった項目」へ回す
+      if (score === null || max === null || max <= 0) { if (!unknown.some((u) => normKey(u) === normKey(name))) unknown.push(name); continue; }
+      criteria.push({ name, score: Math.min(score, max), max, basis: str(c.basis, 500), sources: sanitizeSources(c.sources) });
+    }
+    return {
+      maker,
+      model,
+      category: str(raw.category, 40),
+      required: (Array.isArray(raw.required) ? raw.required.slice(0, 30) : [])
+        .map((r) => (r && typeof r === 'object' && str(r.name, 60) ? {
+          name: str(r.name, 60),
+          status: Object.hasOwn(REQUIRED_STATUS, r.status) ? r.status : 'unknown',   // わからない値は「未確認」
+          basis: str(r.basis, 500),
+          sources: sanitizeSources(r.sources),
+        } : null))
+        .filter(Boolean),
+      criteria,
+      unknown: unknown.slice(0, 30),
+      scoredAt: isDateStr(raw.scoredAt) ? raw.scoredAt : null,
+      scoredBy: Object.hasOwn(SCORED_BY, raw.scoredBy) ? raw.scoredBy : 'claude-chat',
+    };
+  }
+  /** 採点の並びを整える。メーカー+型番が同じものは、後のもので上書き */
+  function sanitizeScores(raw) {
+    const byKey = new Map();
+    for (const r of Array.isArray(raw) ? raw : []) {
+      const sc = sanitizeScore(r);
+      if (sc) byKey.set(scoreKey(sc.maker, sc.model), sc);
+    }
+    return [...byKey.values()].slice(0, SCORES_MAX);
+  }
+
   /** 最初の1回だけ、既定の必要リストを本物のデータとして入れる。消した行は戻らない */
   function seedRequirements(st) {
     const def = window.KURABITO_DEFAULT_REQUIREMENTS;
@@ -236,6 +324,8 @@
       .slice(0, REQ_MAX)
       .map((r) => sanitizeRequirement(r, reqIds))
       .filter(Boolean);
+    const tipIds = new Set();
+    const tips = (Array.isArray(d.tips) ? d.tips : []).slice(0, TIPS_MAX).map((t) => sanitizeTip(t, tipIds)).filter(Boolean);
     const people = num(s.peopleCount);
     const peopleCount = people === null ? 1 : Math.min(99, Math.max(1, Math.round(people)));
     const infants = num(s.infantCount);
@@ -256,8 +346,8 @@
       alerts,
       people: keep(d.people),
       requirements,
-      tips: keep(d.tips),
-      scores: keep(d.scores),
+      tips,
+      scores: sanitizeScores(d.scores),
     });
   }
 
@@ -613,6 +703,7 @@
       it.group && el('span', { class: 'where', text: `まとめ: ${it.group}` }),
       it.amountPer !== null && el('span', { class: 'where', text: `1${it.unit || 'つ'}あたり ${fmtNum(it.amountPer)}${it.amountUnit}` }),
       it.size && el('span', { class: 'where', text: `サイズ ${it.size}` }),
+      scoreBadge(it),
     ]);
     const due = nearestDue(it);
     const label = inBundle ? `${it.name}(${due ? `期限 ${fmtDate(due)}` : '期限なし'})` : it.name;
@@ -888,7 +979,7 @@
     box.replaceChildren(...hits.slice(0, 5).map(({ it }) => el('div', { class: 'sg' }, [
       el('button', {
         type: 'button', class: 'sg-name', 'aria-label': `品名に「${it.name}」を入れる`,
-        on: { click: () => { f.name.value = it.name; resetAutoYomi(); applyAutoYomi(); hideSuggest(); checkAvoid(); saveDraft(); } },
+        on: { click: () => { f.name.value = it.name; resetAutoYomi(); applyAutoYomi(); hideSuggest(); checkAvoid(); renderItemInfo(); saveDraft(); } },
       }, [
         el('span', { text: it.name }),
         it.mark && el('span', { class: `pill ${it.mark}`, text: MARKS[it.mark] }),
@@ -941,6 +1032,7 @@
     for (const it of state.items) if (it.group && !groups.has(normKey(it.group))) groups.set(normKey(it.group), it.group);
     $('#dl-group').replaceChildren(...[...groups.values()].sort((a, b) => a.localeCompare(b, 'ja')).map((g) => el('option', { value: g })));
     hideSuggest();
+    renderItemInfo();
     // よみがなの自動入力は、開いたときの品名から追いかけ直す。入っているよみがなには触らない
     resetAutoYomi();
     autoYomi.filled = null;
@@ -1004,6 +1096,8 @@
   form.elements.name.addEventListener('compositionend', () => { checkAvoid(); updateSuggest(); });
   form.elements.name.addEventListener('input', (ev) => { if (!ev.isComposing) updateSuggest(); });
   for (const name of ['name', 'maker', 'model']) form.elements[name].addEventListener('change', checkAvoid);
+  // Tips と採点は、まとめ名(空なら品名)・ジャンル・メーカー・型番を直したら出し直す
+  for (const name of ['name', 'group', 'genre', 'maker', 'model']) form.elements[name].addEventListener('change', () => renderItemInfo());
   $('#b-copy').addEventListener('click', () => {
     const it = state.items.find((x) => x.id === editingId);
     if (it) openCopy(it);
@@ -1067,8 +1161,8 @@
       const need = ru.amount;
       if (!(need > 0)) continue;   // 乳幼児0人の行などは、数え込みからも一覧からも外す
       const matched = [...new Set(r.match.names.flatMap((n) => byKey.get(normKey(n)) || []))];
-      // 在庫に数えるのは、数量があって「買いたい」でない品(「もう買わない」も、残っていれば在庫)
-      const stock = matched.filter((it) => it.quantity > 0 && it.mark !== 'buy');
+      // 在庫に数えるのは、個数が1以上ある品。買い物の印では除外しない(手元にあって使える物は数える)
+      const stock = matched.filter((it) => it.quantity > 0);
       const kind = unit === '式' ? 'set' : REQ_AMOUNT_UNITS.has(unit) ? 'amount' : 'count';
       const mismatched = [];
       let have = 0;
@@ -1090,7 +1184,7 @@
         anySet: kind === 'set' && f.type === 'fixed',
         rough: kind === 'set' && f.type !== 'fixed',   // 人数分そろっているかは、数量の合計で見る(目安)
         noItems: matched.length === 0,
-        onlyBuy: stock.length === 0 && matched.some((it) => it.mark === 'buy'),
+        onlyBuy: matched.length > 0 && stock.length === 0,   // 当てはまる品はあるが、どれも個数が0
         mismatched: [...new Set(mismatched)],
       });
     }
@@ -1132,7 +1226,7 @@
         el('span', { text: `持ち物にこのまとめ名の品がありません(${r.match.names.join('、')})。名前の違いかもしれません。 ` }),
         el('button', { type: 'button', class: 'btn small', text: 'まとめ名を直す', 'aria-label': `${r.name} のまとめ名を直す`, on: { click: () => openReqForm(r, true) } }),
       ]),
-      x.onlyBuy && el('p', { class: 'note', text: '「買いたい」の印の品だけがあります(在庫には数えません)。' }),
+      x.onlyBuy && el('p', { class: 'note', text: '当てはまる品はありますが、どれも個数が0です(在庫には数えません)。' }),
       x.mismatched.length > 0 && el('p', { class: 'note', text: `単位が合わない品: ${x.mismatched.join('、')}(「1つあたりの量」を ${x.unit} で入れると数えられます)` }),
       x.rough && el('p', { class: 'note', text: '人数分あるかは、当てはまる品の数量の合計で見ています(目安)。' }),
       r.provisionalAmount && el('p', { class: 'note', text: '必要量は仮置きです。' }),
@@ -1365,6 +1459,266 @@
     reader.readAsText(file);
   }
 
+  /* ---------- Tips と製品の採点 ---------- */
+  const sourceText = (src) => [src.title, src.url].filter(Boolean).join(' ');   // URL は文字で見せるだけ(リンクにしない)
+  const sourcesLine = (sources) => sources.length > 0 && el('p', { class: 'src', text: `出典: ${sources.map(sourceText).join(' / ')}` });
+
+  /** その品に当てはまる Tips。まとめ名(空なら品名)が related.names と一致、またはジャンルが related.genres に入っている */
+  function tipsFor(label, genre) {
+    const key = normKey(label);
+    return state.tips.filter((t) => (key && t.related.names.some((n) => normKey(n) === key)) || t.related.genres.includes(genre));
+  }
+  /** その品に当てはまる採点。メーカーと型番がどちらも一致したもの */
+  function scoreFor(maker, model) {
+    if (!normKey(maker) || !normKey(model)) return null;
+    const key = scoreKey(maker, model);
+    return state.scores.find((sc) => scoreKey(sc.maker, sc.model) === key) || null;
+  }
+  const ngNames = (sc) => sc.required.filter((r) => r.status === 'ng').map((r) => r.name);
+
+  /** 一覧の行に付ける小さな印 */
+  function scoreBadge(it) {
+    const sc = scoreFor(it.maker, it.model);
+    if (!sc) return null;
+    return ngNames(sc).length ? el('span', { class: 'pill avoid', text: '✕ 必須条件' }) : el('span', { class: 'pill genre', text: '採点あり' });
+  }
+
+  function tipNode(t) {
+    return el('div', { class: 'tip' }, [
+      el('span', { class: 'pill genre', text: TIP_STATUS[t.status] }),
+      el('p', { class: 'tip-text', text: t.text }),
+      sourcesLine(t.sources),
+    ]);
+  }
+
+  /** 採点の中身。必須条件をいちばん上に、点数はその下(必須条件を満たしていなければ、たたんで「参考」) */
+  function scoreNode(sc) {
+    const ng = ngNames(sc);
+    const meta = [sc.category, sc.scoredAt && `採点日 ${fmtDate(sc.scoredAt)}`, `採点: ${SCORED_BY[sc.scoredBy]}`].filter(Boolean).join(' ・ ');
+    const points = el('details', { class: 'score-points', open: ng.length === 0 }, [
+      el('summary', { text: ng.length ? '点数(参考)を見る' : '点数' }),
+      ...sc.criteria.map((c) => el('div', { class: 'crit' }, [
+        el('p', {}, [el('span', { text: `${c.name} ` }), el('b', { text: `${fmtNum(c.score)}/${fmtNum(c.max)}` })]),
+        c.basis && el('p', { class: 'basis', text: `根拠: ${c.basis}` }),
+        sourcesLine(c.sources),
+      ])),
+      sc.criteria.length === 0 && el('p', { class: 'basis', text: '点の付いた項目はありません。' }),
+      sc.unknown.length > 0 && el('p', { class: 'basis', text: `裏が取れなかった項目(点なし): ${sc.unknown.join('、')}` }),
+    ]);
+    return el('div', { class: 'score' }, [
+      el('p', { class: 'score-head', text: `${sc.maker} ${sc.model}` }),
+      el('p', { class: 'src', text: meta }),
+      ng.length > 0 && el('p', { class: 'ng-banner', text: `✕ 必須条件を満たしていません: ${ng.join('、')}` }),
+      sc.required.length > 0 && el('div', { class: 'required' }, [
+        el('p', { class: 'sub-title', text: '必須条件' }),
+        ...sc.required.map((r) => el('div', { class: `crit ${r.status}` }, [
+          el('p', {}, [el('b', { text: REQUIRED_STATUS[r.status] }), el('span', { text: ` ${r.name}` })]),
+          r.basis && el('p', { class: 'basis', text: `根拠: ${r.basis}` }),
+          sourcesLine(r.sources),
+        ])),
+      ]),
+      points,
+    ]);
+  }
+
+  /** 品の編集画面に、この品の Tips と採点を出す(フォームに入っている値で当てはめる。0件なら何も出さない) */
+  function renderItemInfo() {
+    const f = form.elements;
+    const tips = tipsFor(f.group.value.trim() || f.name.value, f.genre.value);
+    const tipBox = $('#item-tips');
+    tipBox.hidden = tips.length === 0;
+    tipBox.replaceChildren(el('p', { class: 'sub-title', text: `この品の Tips(${tips.length}件)` }), ...tips.map(tipNode));
+    const sc = scoreFor(f.maker.value, f.model.value);
+    const scoreBox = $('#item-score');
+    scoreBox.hidden = !sc;
+    scoreBox.replaceChildren(...(sc ? [el('p', { class: 'sub-title', text: '製品の採点' }), scoreNode(sc)] : []));
+  }
+
+  /* 設定: Tips の一覧 */
+  function renderTips() {
+    $('#tips-title').textContent = `Tips の一覧(${state.tips.length}件)`;
+    $('#tips-list').replaceChildren(...state.tips.map((t) => {
+      const genres = t.related.genres.map((g) => (genreIds().has(g) ? genreName(g) : '(消えたジャンル)'));
+      const target = [t.related.names.length && `まとめ名: ${t.related.names.join('、')}`, genres.length && `ジャンル: ${genres.join('、')}`].filter(Boolean).join(' / ');
+      return el('li', { class: 'req' }, [
+        tipNode(t),
+        el('p', { class: 'sub', text: target ? `出す品 → ${target}` : '出す品が決まっていません(どの品にも出ません)' }),
+        el('div', { class: 'actions' }, [
+          el('button', { type: 'button', class: 'btn small', text: '編集', 'aria-label': 'この Tips を編集', on: { click: () => openTipForm(t) } }),
+          el('button', { type: 'button', class: 'btn small warn', text: '削除', 'aria-label': 'この Tips を削除', on: { click: () => {
+            if (!confirm(`この Tips を削除します。よろしいですか？\n「${t.text.slice(0, 40)}${t.text.length > 40 ? '…' : ''}」`)) return;
+            state.tips = state.tips.filter((x) => x !== t);
+            save();
+            renderAll();
+            toast('削除しました');
+          } } }),
+        ]),
+      ]);
+    }));
+  }
+
+  /* Tips の追加・編集フォーム */
+  const tipDlg = $('#tip-dlg');
+  const tipForm = $('#tip-form');
+  let tipEditingId = null;
+  let tipNames = [];
+
+  function renderTipNames() {
+    $('#tp-names').replaceChildren(...tipNames.map((n) => el('button', {
+      type: 'button', class: 'chip', text: `${n} ✕`, 'aria-label': `まとめ名「${n}」を外す`,
+      on: { click: () => { tipNames = tipNames.filter((x) => x !== n); renderTipNames(); } },
+    })));
+  }
+  function addTipName() {
+    const input = $('#tp-name-new');
+    const n = str(input.value, 40);
+    input.value = '';
+    if (!n || tipNames.some((x) => normKey(x) === normKey(n)) || tipNames.length >= 20) return;
+    tipNames.push(n);
+    renderTipNames();
+  }
+  function addTipSource(src = { title: '', url: '' }) {
+    const box = $('#tp-sources');
+    if (box.children.length >= 10) return;
+    const row = el('div', { class: 'src-row' }, [
+      el('input', { class: 'src-title', maxlength: 100, placeholder: '題名', autocomplete: 'off', 'aria-label': '出典の題名' }),
+      el('input', { class: 'src-url', maxlength: 300, placeholder: 'URL(文字として保存)', autocomplete: 'off', inputmode: 'url', 'aria-label': '出典のURL' }),
+      el('button', { type: 'button', class: 'btn small', text: '✕', 'aria-label': 'この出典を外す', on: { click: () => row.remove() } }),
+    ]);
+    row.querySelector('.src-title').value = src.title;
+    row.querySelector('.src-url').value = src.url;
+    box.append(row);
+  }
+
+  function openTipForm(t) {
+    tipEditingId = t ? t.id : null;
+    $('#tip-dlg-title').textContent = t ? 'Tips を編集' : 'Tips を足す';
+    $('#tip-error').hidden = true;
+    tipForm.reset();
+    const f = tipForm.elements;
+    const v = t || { text: '', status: 'mine', related: { names: [], genres: [] }, sources: [] };
+    f.text.value = v.text;
+    f.status.value = v.status;
+    tipNames = v.related.names.slice();
+    renderTipNames();
+    $('#tp-genres').replaceChildren(el('legend', { text: 'このジャンルの品に出す' }), ...state.genres.map((g) => {
+      const box = el('input', { type: 'checkbox', name: 'tipGenre', value: g.id });
+      box.checked = v.related.genres.includes(g.id);
+      return el('label', { class: 'check' }, [box, el('span', { text: g.name })]);
+    }));
+    $('#tp-sources').replaceChildren();
+    for (const src of v.sources) addTipSource(src);
+    const cands = new Map();
+    for (const it of state.items) {
+      const label = it.group || it.name;
+      if (!cands.has(normKey(label))) cands.set(normKey(label), label);
+    }
+    $('#dl-tip-names').replaceChildren(...[...cands.values()].sort((a, b) => a.localeCompare(b, 'ja')).map((g) => el('option', { value: g })));
+    tipDlg.showModal();
+    tipDlg.scrollTop = 0;
+    if (!t) f.text.focus();
+  }
+
+  tipForm.addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const f = tipForm.elements;
+    const err = $('#tip-error');
+    if (!f.text.value.trim()) { err.textContent = 'Tips の本文を入れてください。'; err.hidden = false; f.text.focus(); return; }
+    addTipName();   // 入力欄に書きかけのまとめ名があれば、それも入れる
+    const old = state.tips.find((t) => t.id === tipEditingId);
+    // いま無いジャンルの識別子(チェック欄に出ないもの)は、編集しても消さない
+    const lost = old ? old.related.genres.filter((g) => !genreIds().has(g)) : [];
+    const tip = sanitizeTip({
+      id: old ? old.id : newId('t'),
+      text: f.text.value,
+      status: f.status.value,
+      related: { names: tipNames, genres: [...tipForm.querySelectorAll('input[name="tipGenre"]:checked')].map((b) => b.value).concat(lost) },
+      sources: [...$('#tp-sources').children].map((row) => ({ title: row.querySelector('.src-title').value, url: row.querySelector('.src-url').value })),
+    }, new Set(state.tips.filter((t) => t !== old).map((t) => t.id)));
+    if (old) state.tips[state.tips.indexOf(old)] = tip; else state.tips.push(tip);
+    if (save()) {
+      tipDlg.close();
+      renderAll();
+      toast(old ? '保存しました' : '足しました');
+    }
+  });
+  $('#tp-name-add').addEventListener('click', addTipName);
+  $('#tp-name-new').addEventListener('keydown', (ev) => { if (ev.key === 'Enter') { ev.preventDefault(); addTipName(); } });
+  $('#tp-source-add').addEventListener('click', () => addTipSource());
+  $('#b-tip-cancel').addEventListener('click', () => tipDlg.close());
+
+  /* 設定: 採点の一覧(見ると削除だけ。中身は取り込みで入れる) */
+  function renderScores() {
+    $('#scores-title').textContent = `採点の一覧(${state.scores.length}件)`;
+    $('#scores-list').replaceChildren(...state.scores.map((sc) => {
+      const owned = state.items.filter((it) => scoreFor(it.maker, it.model) === sc).length;
+      return el('li', { class: 'req' }, [
+        scoreNode(sc),
+        el('p', { class: 'sub', text: owned ? `メーカーと型番が合う品: ${owned}件` : 'メーカーと型番が合う品は、まだありません' }),
+        el('div', { class: 'actions' }, [
+          el('button', { type: 'button', class: 'btn small warn', text: '削除', 'aria-label': `${sc.maker} ${sc.model} の採点を削除`, on: { click: () => {
+            if (!confirm(`「${sc.maker} ${sc.model}」の採点を削除します。よろしいですか？`)) return;
+            state.scores = state.scores.filter((x) => x !== sc);
+            save();
+            renderAll();
+            toast('削除しました');
+          } } }),
+        ]),
+      ]);
+    }));
+  }
+
+  /** Tips・採点のファイルを読み込む(必要リストの取り込みと同じ作り)。apply は、足した結果の文を返す */
+  function importKind(file, kind, label, out, apply) {
+    if (!file) return;
+    const say = (msg) => { out.textContent = msg; toast(msg); };
+    if (file.size > 5 * 1024 * 1024) return say('ファイルが大きすぎます。');
+    const reader = new FileReader();
+    reader.onerror = () => say('ファイルを読めませんでした。');
+    reader.onload = () => {
+      let data;
+      try { data = JSON.parse(String(reader.result)); } catch { return say(`${label}ではないようです。`); }
+      if (!data || data.kind !== kind || !Array.isArray(data[kind])) {
+        return say(data?.app === 'kurabito' ? 'これはバックアップのファイルです。「バックアップ」の「読み込む」を使ってください。' : `${label}ではないようです。`);
+      }
+      if (Number(data.schema) > 1) return say('新しい版で作られたファイルです。アプリを更新してから取り込んでください。');
+      const msg = apply(data[kind]);
+      save();
+      renderAll();
+      say(msg);
+    };
+    reader.readAsText(file);
+  }
+
+  /** Tips の取り込み。同じ id は上書きし、新しい id は足す */
+  function importTips(rows) {
+    let added = 0;
+    let replaced = 0;
+    let broken = 0;
+    for (const raw of rows) {
+      const at = raw && typeof raw.id === 'string' ? state.tips.findIndex((t) => t.id === raw.id) : -1;
+      const others = new Set(state.tips.filter((_, i) => i !== at).map((t) => t.id));
+      const tip = at >= 0 || state.tips.length < TIPS_MAX ? sanitizeTip(raw, others) : null;
+      if (!tip) { broken += 1; continue; }
+      if (at >= 0) { state.tips[at] = tip; replaced += 1; } else { state.tips.push(tip); added += 1; }
+    }
+    return `Tips を ${added}件 足し、${replaced}件 を上書きしました。${broken ? `読めなかった行: ${broken}件。` : ''}`;
+  }
+
+  /** 採点の取り込み。メーカー+型番が同じものは上書きする */
+  function importScores(rows) {
+    let added = 0;
+    let replaced = 0;
+    let broken = 0;
+    for (const raw of rows) {
+      const sc = sanitizeScore(raw);
+      if (!sc) { broken += 1; continue; }
+      const at = state.scores.findIndex((x) => scoreKey(x.maker, x.model) === scoreKey(sc.maker, sc.model));
+      if (at >= 0) { state.scores[at] = sc; replaced += 1; } else if (state.scores.length < SCORES_MAX) { state.scores.push(sc); added += 1; } else broken += 1;
+    }
+    return `採点を ${added}件 足し、${replaced}件 を上書きしました。${broken ? `読めなかった行: ${broken}件。` : ''}`;
+  }
+
   /* ---------- 書き出し・読み込み ---------- */
   async function exportData() {
     const today = todayStr();
@@ -1542,6 +1896,8 @@
 
   function renderSettings() {
     renderGenres();
+    renderTips();
+    renderScores();
     $('#s-lead').value = String(state.settings.leadDays);
     $('#s-people').value = String(state.settings.peopleCount);
     $('#s-infants').value = String(state.settings.infantCount);
@@ -1631,6 +1987,9 @@
       });
     }
     $('#b-req-import').addEventListener('change', (ev) => { importRequirements(ev.target.files[0]); ev.target.value = ''; });
+    $('#b-tip-add').addEventListener('click', () => openTipForm(null));
+    $('#b-tips-import').addEventListener('change', (ev) => { importKind(ev.target.files[0], 'tips', 'Tips のファイル', $('#tips-import-result'), importTips); ev.target.value = ''; });
+    $('#b-scores-import').addEventListener('change', (ev) => { importKind(ev.target.files[0], 'scores', '採点のファイル', $('#scores-import-result'), importScores); ev.target.value = ''; });
     $('#b-export').addEventListener('click', exportData);
     $('#b-import').addEventListener('change', (ev) => { importData(ev.target.files[0]); ev.target.value = ''; });
     $('#b-wipe').addEventListener('click', () => {

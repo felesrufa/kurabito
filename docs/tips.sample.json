@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "kind": "tips",
+  "tips": [
+    {
+      "id": "t_sample_001",
+      "text": "(見本)簡易トイレは、使う前に一度、家で袋の広げ方と固まり方を試しておく。",
+      "status": "experience",
+      "related": { "names": ["簡易トイレ", "携帯トイレ"], "genres": [] },
+      "sources": []
+    },
+    {
+      "id": "t_sample_002",
+      "text": "(見本)飲料水は1人1日3リットルが目安。",
+      "status": "verified",
+      "related": { "names": ["水", "飲料水"], "genres": [] },
+      "sources": [{ "title": "(見本の出典。実在の資料に書き換える)", "url": "https://example.com/bichiku" }]
+    },
+    {
+      "id": "t_sample_003",
+      "text": "(見本)防災グッズは、年に一度、中身を全部出して確かめる。",
+      "status": "mine",
+      "related": { "names": [], "genres": ["bousai"] },
+      "sources": []
+    }
+  ]
+}

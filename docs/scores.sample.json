@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "kind": "scores",
+  "scores": [
+    {
+      "maker": "ソラマメ防災(架空)",
+      "model": "KT-000",
+      "category": "簡易トイレ",
+      "required": [
+        { "name": "1回分ずつ個包装", "status": "ok", "basis": "(見本)製品の説明に個包装とある", "sources": [{ "title": "(見本)製品ページ", "url": "https://example.com/kt-000" }] },
+        { "name": "保存期間10年以上", "status": "unknown", "basis": "(見本)記載が見つからなかった", "sources": [] }
+      ],
+      "criteria": [
+        { "name": "固まる量", "score": 4, "max": 5, "basis": "(見本)1回あたり400mlまで", "sources": [{ "title": "(見本)製品ページ", "url": "https://example.com/kt-000" }] },
+        { "name": "しまいやすさ", "score": 3, "max": 5, "basis": "(見本)50回分で靴箱くらいの大きさ", "sources": [] }
+      ],
+      "unknown": ["耐荷重"],
+      "scoredAt": "2026-11-16",
+      "scoredBy": "claude-chat"
+    },
+    {
+      "maker": "ソラマメ防災(架空)",
+      "model": "LT-999",
+      "category": "LEDランタン",
+      "required": [
+        { "name": "乾電池で動く", "status": "ng", "basis": "(見本)充電式のみで、乾電池は使えない", "sources": [{ "title": "(見本)取扱説明書", "url": "https://example.com/lt-999" }] },
+        { "name": "防滴", "status": "ok", "basis": "(見本)防滴の表示あり", "sources": [] }
+      ],
+      "criteria": [
+        { "name": "明るさ", "score": 5, "max": 5, "basis": "(見本)部屋全体が見える", "sources": [] },
+        { "name": "点灯時間", "score": 2, "max": 5, "basis": "(見本)最大で6時間", "sources": [] }
+      ],
+      "unknown": [],
+      "scoredAt": "2026-11-16",
+      "scoredBy": "claude-chat"
+    }
+  ]
+}
